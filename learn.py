@@ -242,7 +242,7 @@ class FCHypergraphLearning(torch.nn.Module):
         plt.ylabel('Accuracy')
         plt.xlabel('Epoch')
         plt.xticks(range(0, epochs, max(1, epochs // 10)))
-        plt.savefig(f"hypergraph/hypergraph_learning_data/accuracy_fc_{self.type}.svg", format='svg', dpi=1200)
+        plt.savefig(f"figures/accuracy_fc_{self.name}.svg", format='svg', dpi=1200)
         plt.clf()
         plt.close()
 
@@ -255,7 +255,7 @@ class FCHypergraphLearning(torch.nn.Module):
         plt.xlabel('Epoch')
         plt.legend()
         plt.xticks(range(0, epochs, max(1, epochs // 10)))
-        plt.savefig(f"hypergraph/hypergraph_learning_data/loss_fc_{self.type}.svg", format='svg', dpi=1200)
+        plt.savefig(f"figures/loss_fc_{self.name}.svg", format='svg', dpi=1200)
         plt.clf()
         plt.close()
 
