@@ -213,7 +213,7 @@ class FCHypergraphLearning(torch.nn.Module):
             lossLV.append(metrics['val_Loss'])
 
             if best_auc < metrics['val_AUC']:
-                best_auc = metrics['val_Loss']
+                best_auc = metrics['val_AUC']
                 best_model_state = copy.deepcopy(self.state_dict())
                 best_it = epoch
 
