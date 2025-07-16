@@ -251,7 +251,7 @@ class FCHypergraphLearning(torch.nn.Module):
         plt.plot(loss[0], label='Training Loss', linestyle='dashed')
         plt.plot(loss[1], label='Validation Loss', linestyle='solid')
         plt.title('Loss Evolution')
-        plt.ylabel('Loss')
+        plt.ylabel('Loss'
         plt.xlabel('Epoch')
         plt.legend()
         plt.xticks(range(0, epochs, max(1, epochs // 10)))
