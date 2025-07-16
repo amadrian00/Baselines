@@ -1,27 +1,14 @@
 import torch
+import copy
 import torch.nn as nn
 from tqdm import tqdm
 from torch import Tensor
 import matplotlib.pyplot as plt
 from collections import OrderedDict
 from torch_geometric.nn.conv import HypergraphConv
+from torch_geometric.nn.pool import global_max_pool, global_mean_pool
 from torcheval.metrics import BinaryAUROC, BinaryF1Score, BinaryRecall, BinaryConfusionMatrix, BinaryAccuracy
 
-
-class AttentionPooling(nn.Module):
-    def __init__(self, in_dim, hidden_dim=128):
-        super(AttentionPooling, self).__init__()
-        self.att_mlp = nn.Sequential(
-            nn.Linear(in_dim, hidden_dim),
-            nn.Tanh(),
-            nn.Linear(hidden_dim, 1)
-        )
-
-    def forward(self, x):
-        scores = self.att_mlp(x)
-        weights = nn.functional.softmax(scores, dim=1)
-        x_pooled = torch.sum(weights * x, dim=1)
-        return x_pooled
 
 class FCHypergraphLearning(torch.nn.Module):
     def __init__(self, in_size, hidden_size, dropout, device, y: Tensor, name):
@@ -47,9 +34,9 @@ class FCHypergraphLearning(torch.nn.Module):
         self.bn1 = nn.BatchNorm1d(num_features=hidden_size)
         self.bn2 = nn.BatchNorm1d(num_features=int(hidden_size/2))
 
-        self.att_pool = AttentionPooling(int(hidden_size/2),hidden_size)
+        self.embeddingFinal = nn.Linear(int(hidden_size), 1)
 
-        self.embeddingFinal = nn.Linear(int(hidden_size/2), 1)
+        self.best_threshold = 0.5
 
         self._initialize_weights()
 
@@ -82,7 +69,8 @@ class FCHypergraphLearning(torch.nn.Module):
         elif self.name == "k-random":
             hyperedge_index = data.random_hyperedge_index
         else:
-            return 0
+            raise ValueError(
+                f"Invalid 'name' provided: {self.name}. Must be 'knn', 'ts-modelling', 'fc-modelling', or 'k-random'.")
 
         x = self.conv1(input_x, hyperedge_index)
         x = self.bn1(x)
@@ -91,9 +79,9 @@ class FCHypergraphLearning(torch.nn.Module):
         x = self.conv2(x, hyperedge_index)
         x = self.bn2(x)
 
-        x = self.att_pool(x.view(-1, self.roi, x.shape[1]))
-        x = self.dropout(x)
-        x = self.activation(x)
+        x_mean = global_mean_pool(x, batch)
+        x_max = global_max_pool(x, batch)
+        x = torch.cat([x_mean, x_max], dim=1)
 
         x = self.embeddingFinal(x)
 
@@ -103,7 +91,6 @@ class FCHypergraphLearning(torch.nn.Module):
         self.eval()
         with torch.no_grad():
             metrics = {}
-            best_threshold = 0.5
 
             for mode, dataloader in dataloaders.items():
                 total_loss = 0.0
@@ -142,24 +129,25 @@ class FCHypergraphLearning(torch.nn.Module):
                         j = recall + specificity - 1
                         if j > best_j:
                             best_j = j
-                            best_threshold = t.item()
+                            self.best_threshold = t.item()
 
-                f1 = BinaryF1Score(threshold=best_threshold)
+                f1 = BinaryF1Score(threshold=self.best_threshold)
                 f1.update(probs, labels.int())
 
-                acc = BinaryAccuracy(threshold=best_threshold)
+                acc = BinaryAccuracy(threshold=self.best_threshold)
                 acc.update(probs, labels.int())
 
-                recall = BinaryRecall(threshold=best_threshold)
+                recall = BinaryRecall(threshold=self.best_threshold)
                 recall.update(probs, labels.int())
 
                 auroc = BinaryAUROC()
-                auroc.update(probs, labels.int())  # AUROC no necesita threshold
+                auroc.update(probs, labels.int())
 
-                confmat = BinaryConfusionMatrix(threshold=best_threshold)
+                confmat = BinaryConfusionMatrix(threshold=self.best_threshold)
                 confmat.update(probs, labels.int())
                 tn, fp, fn, tp = confmat.compute().flatten()
                 specificity = tn / (tn + fp) if (tn + fp) > 0 else 0.0
+
 
                 metrics[f'{mode}_Loss'] = total_loss / len(dataloader)
                 metrics[f'{mode}_AUC'] = auroc.compute().item()
@@ -174,6 +162,10 @@ class FCHypergraphLearning(torch.nn.Module):
         return self.loss_fn(pred, y.type_as(pred).view_as(pred))
 
     def learn(self, dataloaders, epochs, lr, wd):
+        best_it = -1
+        best_model_state = copy.deepcopy(self.state_dict())
+        best_auc = float('-inf')
+
         t_accu, v_accu, e_accu = [], [], []
         lossL, lossLV = [], []
 
@@ -220,18 +212,25 @@ class FCHypergraphLearning(torch.nn.Module):
             lossL.append(log_loss)
             lossLV.append(metrics['val_Loss'])
 
+            if best_auc < metrics['val_AUC']:
+                best_auc = metrics['val_Loss']
+                best_model_state = copy.deepcopy(self.state_dict())
+                best_it = epoch
 
-        metrics = self.finish_training(epochs, dataloaders, [t_accu, v_accu, e_accu], [lossL, lossLV])
+
+        metrics = self.finish_training(epochs, best_it, dataloaders, [t_accu, v_accu, e_accu, best_auc], [lossL, lossLV],
+                             best_model_state)
         return metrics
 
-    def finish_training(self, epochs, dataloaders, accu, loss):
+    def finish_training(self, epochs, best_it, dataloaders, accu, loss, best_model_state):
+        self.load_state_dict(best_model_state)
         self.to(self.device)
         self.eval()
 
         metrics = self.test(dataloaders, find_threshold=True)
 
-        tqdm.write(f"       Train: {metrics['train_AUC']:.4f}, Val: {metrics['val_AUC']:.4f}, Test: {metrics['test_AUC']:.4f}")
-
+        tqdm.write(f"       Best Model at Iteration {best_it:d}: Train: {metrics['train_AUC']:.4f}, "
+                    f"Val: {metrics['val_AUC']:.4f}, Test: {metrics['test_AUC']:.4f}")
         # Plot Accuracy Evolution
         plt.figure()
         plt.plot(accu[0], label='Train')

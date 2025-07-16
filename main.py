@@ -21,20 +21,20 @@ def k_folds():
 
         fold_results = []
 
-        for fold, (train_loader, val_loader, train_labels) in enumerate(folds):
+        for fold, (train_loader, test_loader, val_loader, train_labels) in enumerate(folds):
             print(f"    Repeat {repeat + 1} - Fold {fold + 1}/{len(folds)} - Training and Validation")
 
-            dataloaders = {'train': train_loader, 'val': val_loader, 'test': val_loader}
+            dataloaders = {'train': train_loader, 'val': val_loader, 'test': test_loader}
             metrics = learn_framework(dataloaders, shape, train_labels, name)
 
             # Log fold results
             fold_results.append([
-                metrics.get("val_Loss", None),
-                metrics.get("val_Accuracy", None),
-                metrics.get("val_AUC", None),
-                metrics.get("val_F1", None),
-                metrics.get("val_Sensitivity", None),
-                metrics.get("val_Specificity", None),
+                metrics.get("test_Loss", None),
+                metrics.get("test_Accuracy", None),
+                metrics.get("test_AUC", None),
+                metrics.get("test_F1", None),
+                metrics.get("test_Sensitivity", None),
+                metrics.get("test_Specificity", None),
 
                 metrics.get("train_Loss", None),
                 metrics.get("train_F1", None),
@@ -45,57 +45,57 @@ def k_folds():
             ])
 
             print(f"        Repeat {repeat + 1} - Fold {fold + 1}/{len(folds)} results:\n"
-                  f"            Train Accuracy:      {metrics['train_Accuracy']:.4f}   |  Val Accuracy:      {metrics['val_Accuracy']:.4f}\n"
-                  f"            Train AUC:           {metrics['train_AUC']:.4f}   |  Val AUC:           {metrics['val_AUC']:.4f}\n"
-                  f"            Train F1:            {metrics['train_F1']:.4f}   |  Val F1:            {metrics['val_F1']:.4f}\n"
-                  f"            Train Sensitivity:   {metrics['train_Sensitivity']:.4f}   |  Val Sensitivity:   {metrics['val_Sensitivity']:.4f}\n"
-                  f"            Train Specificity:   {metrics['train_Specificity']:.4f}   |  Val Specificity:   {metrics['val_Specificity']:.4f}")
+                  f"            Train Accuracy:      {metrics['train_Accuracy']:.4f}   |  Test Accuracy:      {metrics['test_Accuracy']:.4f}\n"
+                  f"            Train AUC:           {metrics['train_AUC']:.4f}   |  Test AUC:           {metrics['test_AUC']:.4f}\n"
+                  f"            Train F1:            {metrics['train_F1']:.4f}   |  Test F1:            {metrics['test_F1']:.4f}\n"
+                  f"            Train Sensitivity:   {metrics['train_Sensitivity']:.4f}   |  Test Sensitivity:   {metrics['test_Sensitivity']:.4f}\n"
+                  f"            Train Specificity:   {metrics['train_Specificity']:.4f}   |  Test Specificity:   {metrics['test_Specificity']:.4f}")
 
         all_results.append(fold_results)
 
-        val_acc_mean = np.mean(np.array(all_results)[:, :, 1].flatten())
-        val_auc_mean = np.mean(np.array(all_results)[:, :, 2].flatten())
-        val_f1_mean = np.mean(np.array(all_results)[:, :, 3].flatten())
-        val_sen_mean = np.mean(np.array(all_results)[:, :, 4].flatten())
-        val_spe_mean = np.mean(np.array(all_results)[:, :, 5].flatten())
+        test_acc_mean = np.mean(np.array(all_results)[:, :, 1].flatten())
+        test_auc_mean = np.mean(np.array(all_results)[:, :, 2].flatten())
+        test_f1_mean = np.mean(np.array(all_results)[:, :, 3].flatten())
+        test_sen_mean = np.mean(np.array(all_results)[:, :, 4].flatten())
+        test_spe_mean = np.mean(np.array(all_results)[:, :, 5].flatten())
 
         print(f"Repeat {repeat + 1}/{n_repeats} - "
-              f"Val Acc Mean: {val_acc_mean:.4f}, "
-              f"Val AUC Mean: {val_auc_mean:.4f}, "
-              f"Val F1 Mean: {val_f1_mean:.4f}, "
-              f"Val Sensitivity Mean: {val_sen_mean:.4f}, "
-              f"Val Specificity Mean: {val_spe_mean:.4f}")
+              f"Test Acc Mean: {test_acc_mean:.4f}, "
+              f"Test AUC Mean: {test_auc_mean:.4f}, "
+              f"Test F1 Mean: {test_f1_mean:.4f}, "
+              f"Test Sensitivity Mean: {test_sen_mean:.4f}, "
+              f"Test Specificity Mean: {test_spe_mean:.4f}")
 
     #vis.plot()
 
     all_results_np = np.array(all_results)
 
-    np.save(f'fold_results_{name}', all_results_np)
+    np.save(f'results/fold_results_{name}', all_results_np)
 
-    val_acc = all_results_np[:, :, 1].flatten()
-    val_auc = all_results_np[:, :, 2].flatten()
-    val_f1 = all_results_np[:, :, 3].flatten()
-    val_sensitivity = all_results_np[:, :, 4].flatten()
-    val_specificity = all_results_np[:, :, 5].flatten()
+    test_acc = all_results_np[:, :, 1].flatten()
+    test_auc = all_results_np[:, :, 2].flatten()
+    test_f1 = all_results_np[:, :, 3].flatten()
+    test_sensitivity = all_results_np[:, :, 4].flatten()
+    test_specificity = all_results_np[:, :, 5].flatten()
 
-    val_acc_mean, val_acc_std = compute_stats(val_acc)
-    val_auc_mean, val_auc_std = compute_stats(val_auc)
-    val_f1_mean, val_f1_std = compute_stats(val_f1)
-    val_sensitivity_mean, val_sensitivity_std = compute_stats(val_sensitivity)
-    val_specificity_mean, val_specificity_std = compute_stats(val_specificity)
+    test_acc_mean, test_acc_std = compute_stats(test_acc)
+    test_auc_mean, test_auc_std = compute_stats(test_auc)
+    test_f1_mean, test_f1_std = compute_stats(test_f1)
+    test_sensitivity_mean, test_sensitivity_std = compute_stats(test_sensitivity)
+    test_specificity_mean, test_specificity_std = compute_stats(test_specificity)
 
     print(f"{'Metric':<20} {'Mean':>10} {'Std':>10}")
     print(f"{'-' * 48}")
     print(
-        f"{'Val Accuracy':<20} {val_acc_mean:>10.4f} {val_acc_std:>10.4f}")
+        f"{'Test Accuracy':<20} {test_acc_mean:>10.4f} {test_acc_std:>10.4f}")
     print(
-        f"{'Val AUC':<20} {val_auc_mean:>10.4f} {val_auc_std:>10.4f}")
+        f"{'Test AUC':<20} {test_auc_mean:>10.4f} {test_auc_std:>10.4f}")
     print(
-        f"{'Val F1':<20} {val_f1_mean:>10.4f} {val_f1_std:>10.4f}")
+        f"{'Test F1':<20} {test_f1_mean:>10.4f} {test_f1_std:>10.4f}")
     print(
-        f"{'Val Sensitivity':<20} {val_sensitivity_mean:>10.4f} {val_sensitivity_std:>10.4f}")
+        f"{'Test Sensitivity':<20} {test_sensitivity_mean:>10.4f} {test_sensitivity_std:>10.4f}")
     print(
-        f"{'Val Specificity':<20} {val_specificity_mean:>10.4f} {val_specificity_std:>10.4f}")
+        f"{'Test Specificity':<20} {test_specificity_mean:>10.4f} {test_specificity_std:>10.4f}")
 
 
 if __name__ == '__main__':
