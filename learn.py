@@ -93,6 +93,7 @@ class FCHypergraphLearning(torch.nn.Module):
 
         x = self.att_pool(x.view(-1, self.roi, x.shape[1]))
         x = self.dropout(x)
+        x = self.activation(x)
 
         x = self.embeddingFinal(x)
 
