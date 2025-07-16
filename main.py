@@ -108,7 +108,7 @@ if __name__ == '__main__':
     batch_size = 64
 
     dropout = 0.3
-    lr = 5e-4
+    lr = 1e-4
     wd = 1e-4
     hidden_size = 64
 
