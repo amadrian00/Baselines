@@ -22,19 +22,26 @@ class FCHypergraph(Dataset):
     def generate_graphs(self):
         result = []
         for i, matrix in enumerate(self.x):
-            hyperedge_index, hyperedge_attr = self.create_hyperedges(matrix)
+            hyperedge_index, hyperedge_weights = self.create_hyperedges(matrix)
             ts_modelling_index = self.ts_modelling(matrix)
-            fc_modelling_index = self.fc_modelling(matrix)
-            random_hyperedge_index = self.create_random_hyperedges(matrix)
+            fc_modelling_index, fc_modelling_weight = self.fc_modelling(matrix)
+            random_hyperedge_index, random_hyperedge_weight = self.create_random_hyperedges(matrix)
 
             graph = Data(x=matrix, y=self.y[i].view(-1, 1),
-                         hyperedge_attr=hyperedge_attr,
-                         hyperedge_weight=torch.mean(hyperedge_attr, dim=1),
 
                          hyperedge_index = hyperedge_index,
+                         hyperedge_attr=hyperedge_weights,
+                         hyperedge_weight=hyperedge_weights,
+
                          ts_modelling_index = ts_modelling_index,
+
                          fc_modelling_index = fc_modelling_index,
+                         fc_modelling_attr = fc_modelling_weight,
+                         fc_modelling_weight = fc_modelling_weight,
+
                          random_hyperedge_index = random_hyperedge_index,
+                         random_hyperedge_attr = random_hyperedge_weight,
+                         random_hyperedge_weight = random_hyperedge_weight,
 
                          edge_index=dense_to_sparse((matrix >= -0.3) & (matrix <= 0.3).int())[0],
                          eye = torch.eye(matrix.shape[0]))
@@ -61,8 +68,9 @@ class FCHypergraph(Dataset):
         H[row, col] = 1
 
         h = torch.concat([H, matrix_dropped], dim=1)
+        index, weight = dense_to_sparse(h)
 
-        return h
+        return index, torch.flatten(weight)
 
     def create_random_hyperedges(self, data):
         N, M = data.shape
@@ -76,6 +84,8 @@ class FCHypergraph(Dataset):
 
         rand_indices = torch.stack(rand_indices)
 
+        hyperedge_attr = torch.gather(data, 1, rand_indices)
+
         hyperedge_index = [[], []]
         for k, nodes in enumerate(rand_indices):
             hyperedge_index[0].extend(nodes)
@@ -83,13 +93,13 @@ class FCHypergraph(Dataset):
 
         hyperedge_index = torch.tensor(hyperedge_index, device=self.device)
 
-        return hyperedge_index
+        return hyperedge_index, hyperedge_attr
 
     def create_hyperedges(self, data):
         distances = torch.cdist(data, data, p=2)  # Euclidean distance
 
         _, knn = torch.topk(distances, self.k + 1, largest=False)
-        hyperedge_attr = torch.gather(data, 1, knn)
+        hyperedge_weights = torch.gather(data, 1, knn)
 
         hyperedge_index = [[], []]
         for k, nodes in enumerate(knn):
@@ -98,7 +108,7 @@ class FCHypergraph(Dataset):
 
         hyperedge_index = torch.tensor(hyperedge_index, device=self.device)
 
-        return hyperedge_index, hyperedge_attr
+        return hyperedge_index, torch.flatten(hyperedge_weights)
 
     def get_dist(self):
         print(' Shape: ', self.y.shape[0])

@@ -99,7 +99,7 @@ def k_folds():
 
 
 if __name__ == '__main__':
-    name = 'knn'
+    name = 'knn' #['knn', 'ts-modelling', 'fc-modelling', 'k-random']
     n_folds = 5
     n_repeats = 1
 

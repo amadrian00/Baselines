@@ -62,17 +62,21 @@ class FCHypergraphLearning(torch.nn.Module):
 
         if self.name == 'knn':
             hyperedge_index = data.hyperedge_index
+            weight = data.hyperedge_weight
         elif self.name == "ts-modelling":
             hyperedge_index = data.ts_modelling_index
+            weight = data.ts_modelling_weight
         elif self.name == "fc-modelling":
             hyperedge_index = data.fc_modelling_index
+            weight = data.fc_modelling_weight
         elif self.name == "k-random":
             hyperedge_index = data.random_hyperedge_index
+            weight = data.random_hyperedge_weight
         else:
             raise ValueError(
                 f"Invalid 'name' provided: {self.name}. Must be 'knn', 'ts-modelling', 'fc-modelling', or 'k-random'.")
 
-        x = self.conv1(input_x, hyperedge_index)
+        x = self.conv1(input_x, hyperedge_index, weight)
         x = self.bn1(x)
         x = self.activation(x)
 
