@@ -99,7 +99,7 @@ def k_folds():
 
 
 if __name__ == '__main__':
-    name = 'knn' #['knn', 'ts-modelling', 'fc-modelling', 'k-random']
+    name = 'knn' #['knn', 'ts-modelling', 'fc-modelling', 'k-random', 'gat']
     n_folds = 5
     n_repeats = 1
 
@@ -108,8 +108,8 @@ if __name__ == '__main__':
     batch_size = 64
 
     dropout = 0.4
-    lr = 1e-4
-    wd = 1e-3
+    lr = 5e-4
+    wd = 1e-4
     hidden_size = 64
 
     epochs = 100

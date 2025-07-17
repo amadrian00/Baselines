@@ -5,7 +5,7 @@ from tqdm import tqdm
 from torch import Tensor
 import matplotlib.pyplot as plt
 from collections import OrderedDict
-from torch_geometric.nn.conv import HypergraphConv
+from torch_geometric.nn.conv import HypergraphConv, GATConv
 from torch_geometric.nn.pool import global_max_pool, global_mean_pool
 from torcheval.metrics import BinaryAUROC, BinaryF1Score, BinaryRecall, BinaryConfusionMatrix, BinaryAccuracy
 
@@ -28,8 +28,12 @@ class FCHypergraphLearning(torch.nn.Module):
         self.roi = in_size
         self.hidden_size = hidden_size
 
-        self.conv1 = HypergraphConv(in_size, hidden_size)
-        self.conv2 = HypergraphConv(hidden_size, int(hidden_size/2))
+        if name == 'gat':
+            self.conv1 = GATConv(in_size, hidden_size)
+            self.conv2 = GATConv(hidden_size, int(hidden_size/2))
+        else:
+            self.conv1 = HypergraphConv(in_size, hidden_size)
+            self.conv2 = HypergraphConv(hidden_size, int(hidden_size/2))
 
         self.bn1 = nn.BatchNorm1d(num_features=hidden_size)
         self.bn2 = nn.BatchNorm1d(num_features=int(hidden_size/2))
@@ -62,21 +66,19 @@ class FCHypergraphLearning(torch.nn.Module):
 
         if self.name == 'knn':
             hyperedge_index = data.hyperedge_index
-            weight = data.hyperedge_weight
         elif self.name == "ts-modelling":
             hyperedge_index = data.ts_modelling_index
-            weight = data.ts_modelling_weight
         elif self.name == "fc-modelling":
             hyperedge_index = data.fc_modelling_index
-            weight = data.fc_modelling_weight
         elif self.name == "k-random":
             hyperedge_index = data.random_hyperedge_index
-            weight = data.random_hyperedge_weight
+        elif self.name == 'gat':
+            hyperedge_index = data.edge_index
         else:
             raise ValueError(
                 f"Invalid 'name' provided: {self.name}. Must be 'knn', 'ts-modelling', 'fc-modelling', or 'k-random'.")
 
-        x = self.conv1(input_x, hyperedge_index, weight)
+        x = self.conv1(input_x, hyperedge_index)
         x = self.bn1(x)
         x = self.activation(x)
 

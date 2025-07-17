@@ -26,6 +26,7 @@ class FCHypergraph(Dataset):
             ts_modelling_index = self.ts_modelling(matrix)
             fc_modelling_index, fc_modelling_weight = self.fc_modelling(matrix)
             random_hyperedge_index, random_hyperedge_weight = self.create_random_hyperedges(matrix)
+            edge_index, weights = dense_to_sparse((matrix >= -0.3) & (matrix <= 0.3).int())
 
             graph = Data(x=matrix, y=self.y[i].view(-1, 1),
 
@@ -43,7 +44,8 @@ class FCHypergraph(Dataset):
                          random_hyperedge_attr = random_hyperedge_weight,
                          random_hyperedge_weight = random_hyperedge_weight,
 
-                         edge_index=dense_to_sparse((matrix >= -0.3) & (matrix <= 0.3).int())[0],
+                         edge_index= edge_index,
+                         weight = weights,
                          eye = torch.eye(matrix.shape[0]))
 
             result.append(graph)
