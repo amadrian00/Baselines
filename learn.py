@@ -212,8 +212,8 @@ class FCHypergraphLearning(torch.nn.Module):
             lossL.append(log_loss)
             lossLV.append(metrics['val_Loss'])
 
-            if best_auc < metrics['val_AUC']:
-                best_auc = metrics['val_AUC']
+            if best_auc < metrics['val_Accuracy']:
+                best_auc = metrics['val_Accuracy']
                 best_model_state = copy.deepcopy(self.state_dict())
                 best_it = epoch
 
@@ -229,8 +229,8 @@ class FCHypergraphLearning(torch.nn.Module):
 
         metrics = self.test(dataloaders, find_threshold=True)
 
-        tqdm.write(f"       Best Model at Iteration {best_it:d}: Train: {metrics['train_AUC']:.4f}, "
-                    f"Val: {metrics['val_AUC']:.4f}, Test: {metrics['test_AUC']:.4f}")
+        tqdm.write(f"       Best Model at Iteration {best_it:d}: Train: {metrics['train_Accuracy']:.4f}, "
+                    f"Val: {metrics['val_Accuracy']:.4f}, Test: {metrics['test_Accuracy']:.4f}")
         # Plot Accuracy Evolution
         plt.figure()
         plt.plot(accu[0], label='Train')

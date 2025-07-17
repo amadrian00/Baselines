@@ -107,9 +107,9 @@ if __name__ == '__main__':
 
     batch_size = 64
 
-    dropout = 0.3
+    dropout = 0.4
     lr = 1e-4
-    wd = 1e-4
+    wd = 1e-3
     hidden_size = 64
 
     epochs = 100
