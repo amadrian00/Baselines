@@ -1,13 +1,19 @@
 import numpy as np
 import torch
-from learn import FCHypergraphLearning
+from learn import FCHypergraphLearning, THFCN
 from utils import get_folds, compute_stats
 
-def learn_framework(dataloaders, shape, train_labels, graph_name):
-    hgl = FCHypergraphLearning(in_size=shape[-1], hidden_size= hidden_size, dropout=dropout,
-                               device=device, y=train_labels, name=graph_name).to(device)
 
-    return hgl.learn(dataloaders, lr=lr, wd=wd, epochs=epochs)
+def learn_framework(dataloaders, shape, train_labels, graph_name):
+    if name == 'thfcn':
+        hgl = THFCN()
+    else:
+        hgl = FCHypergraphLearning(in_size=shape[-1], hidden_size= hidden_size, dropout=dropout,
+                                   device=device, y=train_labels, name=graph_name).to(device)
+
+    metrics = hgl.learn(dataloaders, lr=lr, wd=wd, epochs=epochs)
+
+    return metrics
 
 def k_folds():
     all_results = []
@@ -99,7 +105,7 @@ def k_folds():
 
 
 if __name__ == '__main__':
-    name = 'knn' #['knn', 'ts-modelling', 'fc-modelling', 'k-random', 'gat']
+    name = 'thfcn' #['knn', 'ts-modelling', 'fc-modelling', 'k-random', 'gat', 'thfcn', 'gnn', 'gsage']
     n_folds = 5
     n_repeats = 1
 
