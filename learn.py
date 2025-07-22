@@ -1,14 +1,15 @@
 import torch
 import copy
+import numpy as np
 import torch.nn as nn
+from torch_geometric.utils import dense_to_sparse
 from tqdm import tqdm
 from torch import Tensor
 import matplotlib.pyplot as plt
 from collections import OrderedDict
-from torch_geometric.nn.conv import HypergraphConv, GATConv
+from torch_geometric.nn.conv import HypergraphConv, GATConv, GCNConv, SAGEConv
 from torch_geometric.nn.pool import global_max_pool, global_mean_pool
 from torcheval.metrics import BinaryAUROC, BinaryF1Score, BinaryRecall, BinaryConfusionMatrix, BinaryAccuracy
-
 
 class FCHypergraphLearning(torch.nn.Module):
     def __init__(self, in_size, hidden_size, dropout, device, y: Tensor, name):
@@ -31,12 +32,24 @@ class FCHypergraphLearning(torch.nn.Module):
         if name == 'gat':
             self.conv1 = GATConv(in_size, hidden_size)
             self.conv2 = GATConv(hidden_size, int(hidden_size/2))
+        elif name == 'gsage':
+            self.conv1 = SAGEConv(in_size, hidden_size)
+            self.conv2 = SAGEConv(hidden_size, int(hidden_size / 2))
+        elif name == 'gcn':
+            self.conv1 = GCNConv(in_size, hidden_size)
+            self.conv2 = GCNConv(hidden_size, int(hidden_size / 2))
+        elif name == 'proposed':
+            in_size = 8
+            self.conv1 = HypergraphConv(in_size, hidden_size) #Hyper-Attn
+            self.conv2 = HypergraphConv(hidden_size, int(hidden_size/2))
         else:
-            self.conv1 = HypergraphConv(in_size, hidden_size)
+            self.conv1 = HypergraphConv(in_size, hidden_size) #Hyper-Attn
             self.conv2 = HypergraphConv(hidden_size, int(hidden_size/2))
 
         self.bn1 = nn.BatchNorm1d(num_features=hidden_size)
-        self.bn2 = nn.BatchNorm1d(num_features=int(hidden_size/2))
+
+        self.blinblin = nn.Linear(200, 8)
+        self.blinblin2 = nn.Linear(8, 64)
 
         self.embeddingFinal = nn.Linear(int(hidden_size), 1)
 
@@ -66,24 +79,36 @@ class FCHypergraphLearning(torch.nn.Module):
 
         if self.name == 'knn':
             hyperedge_index = data.hyperedge_index
+            weights = data.hyperedge_weight
         elif self.name == "ts-modelling":
             hyperedge_index = data.ts_modelling_index
+            weights = data.ts_modelling_weight
         elif self.name == "fc-modelling":
             hyperedge_index = data.fc_modelling_index
+            weights = data.fc_modelling_weight
         elif self.name == "k-random":
             hyperedge_index = data.random_hyperedge_index
-        elif self.name == 'gat':
+            weights = data.random_hyperedge_weight
+        elif self.name == 'gat' or self.name == 'gsage' or self.name == 'gcn':
             hyperedge_index = data.edge_index
+            weights = data.weight
+        elif self.name == 'thfcn':
+            hyperedge_index = data.thfcn_index
+            weights = data.thfcn_weight
+        elif self.name == 'proposed':
+            hyperedge_index = data.proposed_hyperedge_index.view(-1,200,40)
+            input_x = data.proposed_x.view(-1, 8)
+            hyperedge_index, weights = dense_to_sparse(hyperedge_index)
+
         else:
             raise ValueError(
                 f"Invalid 'name' provided: {self.name}. Must be 'knn', 'ts-modelling', 'fc-modelling', or 'k-random'.")
 
-        x = self.conv1(input_x, hyperedge_index)
+        x = self.conv1(input_x, hyperedge_index) #Remove weights if using GraphSAGE and proposed
         x = self.bn1(x)
         x = self.activation(x)
 
         x = self.conv2(x, hyperedge_index)
-        x = self.bn2(x)
 
         x_mean = global_mean_pool(x, batch)
         x_max = global_max_pool(x, batch)
@@ -248,7 +273,7 @@ class FCHypergraphLearning(torch.nn.Module):
         plt.ylabel('Accuracy')
         plt.xlabel('Epoch')
         plt.xticks(range(0, epochs, max(1, epochs // 10)))
-        plt.savefig(f"figures/accuracy_fc_{self.name}.svg", format='svg', dpi=1200)
+        plt.savefig(f"figures/accuracy_fc_{self.name}_hyper.svg", format='svg', dpi=1200)
         plt.clf()
         plt.close()
 
@@ -261,7 +286,7 @@ class FCHypergraphLearning(torch.nn.Module):
         plt.xlabel('Epoch')
         plt.legend()
         plt.xticks(range(0, epochs, max(1, epochs // 10)))
-        plt.savefig(f"figures/loss_fc_{self.name}.svg", format='svg', dpi=1200)
+        plt.savefig(f"figures/loss_fc_{self.name}_hyper.svg", format='svg', dpi=1200)
         plt.clf()
         plt.close()
 

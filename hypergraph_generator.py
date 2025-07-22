@@ -3,10 +3,10 @@ import torch
 import numpy as np
 from torch_geometric.data import Data, Dataset
 from torch_geometric.utils import dense_to_sparse
-from thfcn.mutitask_Lasso_manual import mutitaskLasso
-from thfcn.THFCN_ADNI import normalize, create_dataset4
-from thfcn.construct_hyper_graph_KNN import construct_H_with_KNN, generate_S_from_H
+from thfcn.THFCN_ADNI import normalize
+from thfcn.construct_hyper_graph_KNN import construct_H_with_KNN
 from sklearn.linear_model import Lasso
+from hypergraph.fc_hypergraph_learning2 import CorrelationToIncidenceTransformer
 
 
 class FCHypergraph(Dataset):
@@ -33,8 +33,6 @@ class FCHypergraph(Dataset):
             self.calculated_ts = []
             self.loaded = False
 
-
-
         self.graphs = self.generate_graphs()
 
     def generate_graphs(self):
@@ -45,7 +43,8 @@ class FCHypergraph(Dataset):
             fc_modelling_index, fc_modelling_weight = self.fc_modelling(matrix)
             random_hyperedge_index, random_hyperedge_weight = self.create_random_hyperedges(matrix)
             edge_index, weights = dense_to_sparse((matrix >= -0.3) & (matrix <= 0.3).int())
-            thfcn = self.thfcn(self.data['time'][i][0])
+
+            thfcn_index, thfcn_weights = self.thfcn(self.data['time'][i][0])
 
             graph = Data(x=matrix, y=self.y[i].view(-1, 1),
 
@@ -66,23 +65,25 @@ class FCHypergraph(Dataset):
                          random_hyperedge_weight = random_hyperedge_weight,
 
                          edge_index= edge_index,
-                         weight = weights,
+                         weight = weights.float(),
                          eye = torch.eye(matrix.shape[0]),
 
-                         thfcn = thfcn,
+                         thfcn_index = thfcn_index,
+                         thfcn_weight = thfcn_weights.float(),
+                         thfcn_attr=thfcn_weights.float(),
                          )
 
-            self.calculated_ts.append(ts_modelling_index)
-
+            if not self.loaded: self.calculated_ts.append(ts_modelling_index)
             result.append(graph)
-        torch.save(self.calculated_ts, 'calculated_ts.pt')
+
+        if not self.loaded: torch.save(self.calculated_ts, 'calculated_ts.pt')
+
         self.get_dist()
         return result
 
-
     def ts_modelling(self, ts, i):
         if self.loaded:
-            return self.calculated_ts[i], torch.tensor([0])
+            return self.calculated_ts[i],  torch.ones(len(self.calculated_ts[i][0]))
 
         alphas = []
         hyperedges = []
@@ -117,22 +118,16 @@ class FCHypergraph(Dataset):
             hyperedge_index[1].extend([i] * len(nodes))
 
         hyperedge_index = torch.tensor(hyperedge_index, device=self.device)
-        return hyperedge_index, torch.tensor([0])
+        return hyperedge_index, torch.ones(len(self.calculated_ts[i][0]))
 
-    def thfcn(self, ts, knn=10):
-        new_ts_run1 = ts[:, 0:200]
-        normalize_style = '-01'  # （-1，1）
-        dataset_run1, maxV, minV = normalize(new_ts_run1, normalize_style)
+    def thfcn(self, ts):
+        dataset_run1, maxV, minV = normalize(ts, '-01')
 
-        H = construct_H_with_KNN(dataset_run1.T, knn)
-        S, L = generate_S_from_H(H)
-        L = np.array(L)
+        H = construct_H_with_KNN(dataset_run1.T, 10)
 
-        X, Y = create_dataset4(dataset_run1, 1)
-        W, _ = mutitaskLasso(X, Y, L, 0.01, 0.01,  1e-24, 0)
-        if W is None:
-            W = [[0],[0]]
-        return W.flatten()
+        h, weights = dense_to_sparse(torch.tensor(H))
+
+        return h, weights
 
     def fc_modelling(self, matrix):
         n = matrix.shape[0]
@@ -146,34 +141,33 @@ class FCHypergraph(Dataset):
         row, col = torch.where(Z > self.threshold)
         H = torch.zeros((n, n))
 
-        H[row, col] = 1
+        H[row, col] = Z[row,col]
 
-        h = torch.concat([H, matrix_dropped], dim=1)
+        h = (H.T+matrix_dropped).T
         index, weight = dense_to_sparse(h)
         return index, torch.flatten(weight)
 
     def create_random_hyperedges(self, data):
-        N, M = data.shape
-
+        N, _ = data.shape
+        device = data.device
         rand_indices = []
         for i in range(N):
-            candidates = torch.cat([torch.arange(0, i), torch.arange(i + 1, M)])
-            sampled = candidates[torch.randperm(M - 1)[:self.k]]
-            indices = torch.cat([torch.tensor([i], device=data.device), sampled])
-            rand_indices.append(indices)
+            candidates = torch.cat([torch.arange(0, i), torch.arange(i + 1, N)]).to(device)
+            sampled = candidates[torch.randperm(N - 1, device=device)[:self.k]]
+            full_hyperedge = torch.cat([torch.tensor([i], device=device), sampled])
+            rand_indices.append(full_hyperedge)
 
         rand_indices = torch.stack(rand_indices)
-
-        hyperedge_attr = torch.gather(data, 1, rand_indices)
+        hyperedge_weights = torch.gather(data, 1, rand_indices)
 
         hyperedge_index = [[], []]
-        for k, nodes in enumerate(rand_indices):
-            hyperedge_index[0].extend(nodes)
-            hyperedge_index[1].extend([k] * len(nodes))  # k is the hyperedge index
+        for hyperedge_id, nodes in enumerate(rand_indices):
+            hyperedge_index[0].extend(nodes.tolist())
+            hyperedge_index[1].extend([hyperedge_id] * len(nodes))
 
-        hyperedge_index = torch.tensor(hyperedge_index, device=self.device)
-
-        return hyperedge_index, hyperedge_attr
+        hyperedge_index = torch.tensor(hyperedge_index, device=device)
+        hyperedge_weights[hyperedge_weights < 0] = 0.001
+        return hyperedge_index, torch.flatten(hyperedge_weights)
 
     def create_hyperedges(self, data):
         distances = torch.cdist(data, data, p=2)  # Euclidean distance
@@ -204,3 +198,53 @@ class FCHypergraph(Dataset):
 
     def __len__(self):
         return len(self.y)
+
+
+
+class SecondFCHypergraph(Dataset):
+    def __init__(self, data, model, device, **kwargs):
+        super(SecondFCHypergraph, self).__init__(**kwargs)
+        self.device = device
+
+        self.data = data
+
+        self.model = model
+
+        self.graphs = self.generate_graphs()
+
+    def generate_graphs(self):
+        result = []
+        for batch in self.data:
+            for i, fc in enumerate(batch.x.view(-1,200,200)):
+                proposed_hyperedge_index, proposed_hyperedge_weight, proposed_x = self.proposed(fc.to(self.device))
+
+                graph = Data(x=fc, y=batch.y[i].view(-1, 1),
+
+                             proposed_hyperedge_index=proposed_hyperedge_index,
+                             proposed_weight=proposed_hyperedge_weight,
+                             proposed_x=proposed_x,
+                             )
+
+                result.append(graph)
+        return result
+
+    def proposed(self, fc):
+        incidence, _, _, x, hyperedge_attr = self.model(fc)
+
+        x_min = incidence.min()
+        x_max = incidence.max()
+        incidence = (incidence - x_min) / (x_max - x_min)
+
+        proposed_hyperedge_index = incidence.detach().squeeze()
+        proposed_hyperedge_index = torch.where(proposed_hyperedge_index < 0.01, torch.tensor(0.0),
+                                               proposed_hyperedge_index)
+
+        weight = torch.tensor([0])
+
+        return proposed_hyperedge_index, weight, x.squeeze().detach()
+
+    def __getitem__(self, index):
+        return self.graphs[index]
+
+    def __len__(self):
+        return len(self.graphs)

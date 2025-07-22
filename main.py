@@ -1,17 +1,31 @@
 import numpy as np
 import torch
-from learn import FCHypergraphLearning, THFCN
-from utils import get_folds, compute_stats
+from learn import FCHypergraphLearning
+from hypergraph.fc_hypergraph_learning2 import CorrelationToIncidenceTransformer as Pretrain
+from utils import get_folds, compute_stats, prepare_dataloader
+from hypergraph_generator import SecondFCHypergraph
 
 
 def learn_framework(dataloaders, shape, train_labels, graph_name):
-    if name == 'thfcn':
-        hgl = THFCN()
-    else:
-        hgl = FCHypergraphLearning(in_size=shape[-1], hidden_size= hidden_size, dropout=dropout,
-                                   device=device, y=train_labels, name=graph_name).to(device)
+    if name == 'proposed':
+        pretrain = Pretrain(in_size=shape[-1], hidden_size= hidden_size, dropout=dropout,
+                               device=device, y=train_labels, seq_len=0, num_layers=1, num_hyperedges=20, num_heads=1).to(device)
 
-    metrics = hgl.learn(dataloaders, lr=lr, wd=wd, epochs=epochs)
+        metrics = pretrain.learn(dataloaders, lr=lr, wd=wd, epochs=epochs)
+        pretrain.finished_training = True
+        new_dataloaders = {}
+        for mode in dataloaders:
+            dataset = SecondFCHypergraph(dataloaders[mode], pretrain, device)
+            if mode == 'train':
+                new_dataloaders[mode] = prepare_dataloader(dataset, batch_size=batch_size, shuffle=True)
+            else:
+                new_dataloaders[mode] = prepare_dataloader(dataset, batch_size=len(dataset))
+    else:
+        new_dataloaders = dataloaders
+    hgl = FCHypergraphLearning(in_size=shape[-1], hidden_size=hidden_size, dropout=dropout,
+                               device=device, y=train_labels, name=graph_name).to(device)
+
+    metrics = hgl.learn(new_dataloaders, lr=lr, wd=wd, epochs=epochs)
 
     return metrics
 
@@ -72,11 +86,9 @@ def k_folds():
               f"Test Sensitivity Mean: {test_sen_mean:.4f}, "
               f"Test Specificity Mean: {test_spe_mean:.4f}")
 
-    #vis.plot()
-
     all_results_np = np.array(all_results)
 
-    np.save(f'results/fold_results_{name}', all_results_np)
+    np.save(f'results/fold_results_{name}_hyper', all_results_np)
 
     test_acc = all_results_np[:, :, 1].flatten()
     test_auc = all_results_np[:, :, 2].flatten()
@@ -105,7 +117,7 @@ def k_folds():
 
 
 if __name__ == '__main__':
-    name = 'thfcn' #['knn', 'ts-modelling', 'fc-modelling', 'k-random', 'gat', 'thfcn', 'gnn', 'gsage']
+    name = 'proposed' #['knn', 'ts-modelling', 'fc-modelling', 'k-random', 'gat', 'thfcn', 'gcn', 'gsage', 'proposed']
     n_folds = 5
     n_repeats = 1
 
@@ -113,8 +125,8 @@ if __name__ == '__main__':
 
     batch_size = 64
 
-    dropout = 0.4
-    lr = 5e-4
+    dropout = 0.3
+    lr = 1e-5
     wd = 1e-4
     hidden_size = 64
 
