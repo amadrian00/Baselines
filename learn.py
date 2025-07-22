@@ -12,7 +12,7 @@ from torch_geometric.nn.pool import global_max_pool, global_mean_pool
 from torcheval.metrics import BinaryAUROC, BinaryF1Score, BinaryRecall, BinaryConfusionMatrix, BinaryAccuracy
 
 class FCHypergraphLearning(torch.nn.Module):
-    def __init__(self, in_size, hidden_size, dropout, device, y: Tensor, name):
+    def __init__(self, in_size, hidden_size, dropout, device, y: Tensor, num_hyperedges, name):
         super(FCHypergraphLearning, self).__init__()
 
         self.name = name
@@ -28,6 +28,7 @@ class FCHypergraphLearning(torch.nn.Module):
 
         self.roi = in_size
         self.hidden_size = hidden_size
+        self.num_hyperedges = num_hyperedges
 
         if name == 'gat':
             self.conv1 = GATConv(in_size, hidden_size)
@@ -39,7 +40,7 @@ class FCHypergraphLearning(torch.nn.Module):
             self.conv1 = GCNConv(in_size, hidden_size)
             self.conv2 = GCNConv(hidden_size, int(hidden_size / 2))
         elif name == 'proposed':
-            in_size = 8
+            in_size = in_size
             self.conv1 = HypergraphConv(in_size, hidden_size) #Hyper-Attn
             self.conv2 = HypergraphConv(hidden_size, int(hidden_size/2))
         else:
@@ -47,9 +48,6 @@ class FCHypergraphLearning(torch.nn.Module):
             self.conv2 = HypergraphConv(hidden_size, int(hidden_size/2))
 
         self.bn1 = nn.BatchNorm1d(num_features=hidden_size)
-
-        self.blinblin = nn.Linear(200, 8)
-        self.blinblin2 = nn.Linear(8, 64)
 
         self.embeddingFinal = nn.Linear(int(hidden_size), 1)
 
@@ -96,15 +94,14 @@ class FCHypergraphLearning(torch.nn.Module):
             hyperedge_index = data.thfcn_index
             weights = data.thfcn_weight
         elif self.name == 'proposed':
-            hyperedge_index = data.proposed_hyperedge_index.view(-1,200,40)
-            input_x = data.proposed_x.view(-1, 8)
+            hyperedge_index = data.proposed_hyperedge_index.view(-1,200,self.num_hyperedges)
             hyperedge_index, weights = dense_to_sparse(hyperedge_index)
 
         else:
             raise ValueError(
                 f"Invalid 'name' provided: {self.name}. Must be 'knn', 'ts-modelling', 'fc-modelling', or 'k-random'.")
 
-        x = self.conv1(input_x, hyperedge_index) #Remove weights if using GraphSAGE and proposed
+        x = self.conv1(input_x, hyperedge_index, weights) #Remove weights if using GraphSAGE
         x = self.bn1(x)
         x = self.activation(x)
 

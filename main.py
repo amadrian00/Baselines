@@ -8,11 +8,13 @@ from hypergraph_generator import SecondFCHypergraph
 
 def learn_framework(dataloaders, shape, train_labels, graph_name):
     if name == 'proposed':
-        pretrain = Pretrain(in_size=shape[-1], hidden_size= hidden_size, dropout=dropout,
-                               device=device, y=train_labels, seq_len=0, num_layers=1, num_hyperedges=20, num_heads=1).to(device)
+        pretrain = Pretrain(in_size=shape[-1], hidden_size= 8, dropout=dropout,
+                               device=device, y=train_labels, seq_len=0, num_layers=1, num_hyperedges=num_hyperedges, num_heads=1).to(device)
 
-        metrics = pretrain.learn(dataloaders, lr=lr, wd=wd, epochs=epochs)
+        metrics = pretrain.learn(dataloaders, lr=lr*50, wd=wd, epochs=epochs)
         pretrain.finished_training = True
+        pretrain(next(iter(dataloaders['train'])).to(device))
+        pretrain.finished_training = False
         new_dataloaders = {}
         for mode in dataloaders:
             dataset = SecondFCHypergraph(dataloaders[mode], pretrain, device)
@@ -23,9 +25,9 @@ def learn_framework(dataloaders, shape, train_labels, graph_name):
     else:
         new_dataloaders = dataloaders
     hgl = FCHypergraphLearning(in_size=shape[-1], hidden_size=hidden_size, dropout=dropout,
-                               device=device, y=train_labels, name=graph_name).to(device)
+                               device=device, y=train_labels, name=graph_name, num_hyperedges=num_hyperedges).to(device)
 
-    metrics = hgl.learn(new_dataloaders, lr=lr, wd=wd, epochs=epochs)
+    metrics = hgl.learn(new_dataloaders, lr=lr*5, wd=wd, epochs=epochs)
 
     return metrics
 
@@ -131,5 +133,7 @@ if __name__ == '__main__':
     hidden_size = 64
 
     epochs = 100
+
+    num_hyperedges = 20
 
     k_folds()

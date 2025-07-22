@@ -229,14 +229,10 @@ class SecondFCHypergraph(Dataset):
         return result
 
     def proposed(self, fc):
-        incidence, _, _, x, hyperedge_attr = self.model(fc)
-
-        x_min = incidence.min()
-        x_max = incidence.max()
-        incidence = (incidence - x_min) / (x_max - x_min)
+        incidence, _, _, x, hyperedge_attr, _ = self.model(fc)
 
         proposed_hyperedge_index = incidence.detach().squeeze()
-        proposed_hyperedge_index = torch.where(proposed_hyperedge_index < 0.01, torch.tensor(0.0),
+        proposed_hyperedge_index = torch.where(proposed_hyperedge_index < 0.2, torch.tensor(0.0),
                                                proposed_hyperedge_index)
 
         weight = torch.tensor([0])

@@ -126,7 +126,8 @@ class HypergraphConvLayer(nn.Module):
         weighted = w.unsqueeze(-1) * hyperedge_degree_norm             # W * (B^-1 * (H^T @ X))
         feats_to_nodes = torch.matmul(H, weighted)                     # H @ (W * B^-1 * (H^T @ X))
         node_degree_norm = D_inv.unsqueeze(-1) * feats_to_nodes        # D^-1 * (H @ (W * B^-1 * (H^T @ X)))
-        x_out = torch.matmul(node_degree_norm, self.theta)             # (D^-1 * (H @ (W * B^-1 * (H^T @ X)))) @ theta
+        #x_out = torch.matmul(node_degree_norm, self.theta)             # (D^-1 * (H @ (W * B^-1 * (H^T @ X)))) @ theta
+        x_out = node_degree_norm
 
         # Add bias if enabled
         if self.bias is not None:
@@ -180,21 +181,21 @@ class FCHypergraphLearning(torch.nn.Module):
         self.min_tau = 0.1
 
         if custom_layer:
-            self.conv1 = HypergraphConvLayer(in_size, hidden_size, use_attention=False)
-            self.conv2 = HypergraphConvLayer(hidden_size, int(hidden_size/2), use_attention=False)
+            self.conv1 = HypergraphConvLayer(in_size, in_size, use_attention=False)
+            self.conv2 = HypergraphConvLayer(in_size, int(in_size), use_attention=False)
         else:
             self.conv1 = HypergraphConv(in_size, hidden_size)
             self.conv2 = HypergraphConv(hidden_size, hidden_size)
 
-        self.bn1 = nn.BatchNorm1d(num_features=hidden_size)
-        self.bn2 = nn.BatchNorm1d(num_features=int(hidden_size/2))
+        self.bn1 = nn.BatchNorm1d(num_features=in_size)
+        self.bn2 = nn.BatchNorm1d(num_features=int(in_size))
 
         self.att_pool = AttentionPooling(int(hidden_size/2),hidden_size)
 
         self.show = False
 
         self.dynamic = False
-        self.embeddingFinal = nn.Linear(int(hidden_size), 1)
+        self.embeddingFinal = nn.Linear(int(400), 1)
             # Careful this needs to be changed to hidden_size for knn and nslr
 
         self._initialize_weights()
@@ -511,7 +512,8 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
     def gumbel_softmax_sample(self, logits):
         U = torch.rand_like(logits)
         gumbel = -torch.log(-torch.log(U + 1e-9) + 1e-9)
-        return torch.softmax((logits + gumbel) / self.tau, dim=-1)
+        #return torch.softmax((logits + gumbel) / self.tau, dim=-1)
+        return torch.sigmoid((logits + gumbel) / self.tau)
 
     def forward(self, data):
         try:
@@ -547,6 +549,7 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
 
 
         #input_x = self.bn0(nf.view(-1, nf.shape[-1])).view(incidence_matrix.shape[0], self.roi, -1)
+        #input_x  = torch.eye(self.roi).expand(incidence_matrix.shape[0], -1, -1).to(incidence_matrix.device)
         if self.finished_training:
             incidence_matrix = incidence_matrix.detach()
             self.plot_corr(input_x[0], "_origin")
@@ -581,11 +584,98 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
 
         x_mean = torch.mean(x, dim=1)
         x_max = torch.max(x, dim=1)[0]
-        x = torch.cat([x_mean, x_max], dim=1)
+        x_g = torch.cat([x_mean, x_max], dim=1)
+
+        x = self.dropout(x_g)
 
         x = self.embeddingFinal(x)
 
-        return incidence_matrix, graph_vector, x, input_x, self.transformer2.learnable_axes
+        return incidence_matrix, graph_vector, x, input_x, self.transformer2.learnable_axes, x_g
+
+    def contrastive_loss2(self, x, labels, margin=1.0):
+        """
+        x: [B, D] embeddings
+        labels: [B] etiquetas (0 o 1)
+        margin: margen para los negativos
+        """
+        B = x.size(0)
+
+        # Expandimos para pares (i, j)
+        x_i = x.unsqueeze(1)  # [B, 1, D]
+        x_j = x.unsqueeze(0)  # [1, B, D]
+
+        # Distancias euclídeas entre todos los pares
+        dists = torch.norm(x_i - x_j, dim=-1)  # [B, B]
+
+        # Creamos la máscara de pares positivos y negativos
+        labels_i = labels.unsqueeze(1)  # [B, 1]
+        labels_j = labels.unsqueeze(0)  # [1, B]
+
+        same_class = (labels_i == labels_j).float()  # [B, B]
+        diff_class = 1.0 - same_class  # [B, B]
+
+        # Evitamos la diagonal (pares idénticos)
+        mask_offdiag = ~torch.eye(B, dtype=torch.bool, device=x.device)
+        same_class = same_class * mask_offdiag
+        diff_class = diff_class * mask_offdiag
+        dists = dists * mask_offdiag
+
+        # Pérdida contrastiva:
+        pos_loss = (same_class * dists.pow(2)).sum()
+        neg_loss = (diff_class * torch.clamp(margin - dists, min=0).pow(2)).sum()
+
+        # Normalizamos
+        num_pos = same_class.sum().clamp(min=1)
+        num_neg = diff_class.sum().clamp(min=1)
+
+        loss = (pos_loss / num_pos) + (neg_loss / num_neg)
+        return loss
+
+    def js_divergence(self, p, q, eps=1e-8):
+        """
+        Jensen-Shannon divergence entre dos distribuciones p y q,
+        con p,q shape = [dim] y valores >=0 que suman 1.
+        """
+        m = 0.5 * (p + q)
+        p_log = torch.log(p + eps)
+        q_log = torch.log(q + eps)
+        m_log = torch.log(m + eps)
+        return 0.5 * (torch.sum(p * (p_log - m_log), dim=-1) + torch.sum(q * (q_log - m_log), dim=-1))
+
+    def contrastive_loss(self, H, labels, margin=1.0):
+        # H: [B, N, E], distribuciones fila a fila (softmax)
+        B, N, E = H.shape
+
+        # Expand dimensiones para pares (broadcast)
+        H_i = H.unsqueeze(1)  # [B,1,N,E]
+        H_j = H.unsqueeze(0)  # [1,B,N,E]
+
+        # Calcular JS divergencia para cada par y fila
+        # Resultado shape: [B,B,N]
+        js_per_row = self.js_divergence(H_i, H_j)  # vectorizado sobre último eje E
+
+        # Promediar sobre filas (nodos) para un único valor por par
+        dist = js_per_row.mean(dim=2)  # [B,B]
+
+        # Máscaras de clase
+        labels = labels.view(-1, 1)  # [B,1]
+        same_class = (labels == labels.T).float()  # [B,B]
+        diff_class = 1.0 - same_class  # [B,B]
+
+        # Máscara para ignorar diagonal (pares i==j)
+        mask = ~torch.eye(B, dtype=torch.bool, device=H.device)
+
+        # Pérdida positiva (pares mismos labels)
+        pos_loss = (dist * same_class)[mask].sum()
+
+        # Pérdida negativa (pares diferentes labels)
+        neg_loss = (F.relu(margin - dist) * diff_class)[mask].sum()
+
+        total_pairs = B * (B - 1)
+
+        loss = (pos_loss + neg_loss) / total_pairs
+
+        return loss
 
     def recon_loss(self, H, FC):
         W = torch.diag(self.W_recon)
@@ -628,6 +718,9 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
         entropy_reg = entropy_loss(pred[0])
 
         recon_loss = self.recon_loss(pred[0], kwargs.get('x').view(-1, self.roi, self.roi))
+        contr_loss = self.contrastive_loss(pred[0], y)
+        contr_loss2 = self.contrastive_loss2(pred[5], y)
+        weight_loss = pred[0].mean()
 
         if self.show:
             print("\n[LOSS COMPONENTS]")
@@ -636,7 +729,7 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
             print(f"Entropy loss: {entropy_reg.item():.4f}")
             print(f"Reconstruction loss: {recon_loss.item():.4f}")
 
-        return 1 * class_loss + 0.0 * class_loss2 + 0.5*entropy_reg + 0.1*recon_loss
+        return 0 * class_loss + 0.5 * contr_loss * 0.5*contr_loss2 + 0.5*weight_loss + 0.5*entropy_reg #+ 0.25*recon_loss
 
     @staticmethod
     def plot_corr(x, suffix='', vmin=0):
@@ -650,5 +743,7 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
 
 
 def entropy_loss(H):
-    H = torch.clamp(H, 1e-8)
-    return -(H * H.log()).sum(dim=-1).mean()
+    H = torch.clamp(H, 1e-8, 1 - 1e-8)
+
+    #return -(H * H.log()).sum(dim=-1).mean()
+    return F.binary_cross_entropy(H, H.detach(), reduction='mean')
