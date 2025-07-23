@@ -6,8 +6,6 @@ from torch_geometric.utils import dense_to_sparse
 from thfcn.THFCN_ADNI import normalize
 from thfcn.construct_hyper_graph_KNN import construct_H_with_KNN
 from sklearn.linear_model import Lasso
-from hypergraph.fc_hypergraph_learning2 import CorrelationToIncidenceTransformer
-
 
 class FCHypergraph(Dataset):
     def __init__(self, data, k=2, th = 0.05, torch_device='cpu', **kwargs):
@@ -229,7 +227,7 @@ class SecondFCHypergraph(Dataset):
         return result
 
     def proposed(self, fc):
-        incidence, _, _, x, hyperedge_attr, _ = self.model(fc)
+        incidence, _, x, _ = self.model(fc)
 
         proposed_hyperedge_index = incidence.detach().squeeze()
         proposed_hyperedge_index = torch.where(proposed_hyperedge_index < 0.2, torch.tensor(0.0),

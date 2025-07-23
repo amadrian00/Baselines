@@ -123,7 +123,7 @@ class BrainNetworkTransformer(BaseModel):
 
         nf = self.dim_reduction(node_feature)
 
-        return self.fc(nf.reshape((bz, -1))), node_feature, nf
+        return self.fc(nf.reshape((bz, -1))), node_feature, assignment
 
     def get_attention_weights(self):
         return [atten.get_attention_weights() for atten in self.attention_list]

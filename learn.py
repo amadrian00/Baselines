@@ -105,7 +105,7 @@ class FCHypergraphLearning(torch.nn.Module):
         x = self.bn1(x)
         x = self.activation(x)
 
-        x = self.conv2(x, hyperedge_index)
+        x = self.conv2(x, hyperedge_index, weights)
 
         x_mean = global_mean_pool(x, batch)
         x_max = global_max_pool(x, batch)

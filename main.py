@@ -8,10 +8,10 @@ from hypergraph_generator import SecondFCHypergraph
 
 def learn_framework(dataloaders, shape, train_labels, graph_name):
     if name == 'proposed':
-        pretrain = Pretrain(in_size=shape[-1], hidden_size= 8, dropout=dropout,
+        pretrain = Pretrain(in_size=shape[-1], hidden_size= hidden_size, dropout=dropout,
                                device=device, y=train_labels, seq_len=0, num_layers=1, num_hyperedges=num_hyperedges, num_heads=1).to(device)
 
-        metrics = pretrain.learn(dataloaders, lr=lr*50, wd=wd, epochs=epochs)
+        metrics = pretrain.learn(dataloaders, lr=lr*5, wd=wd, epochs=epochs*5)
         pretrain.finished_training = True
         pretrain(next(iter(dataloaders['train'])).to(device))
         pretrain.finished_training = False
@@ -127,13 +127,13 @@ if __name__ == '__main__':
 
     batch_size = 64
 
-    dropout = 0.3
-    lr = 1e-5
-    wd = 1e-4
+    dropout = 0.4
+    lr = 1e-4
+    wd = 1e-3
     hidden_size = 64
 
     epochs = 100
 
-    num_hyperedges = 20
+    num_hyperedges = 40
 
     k_folds()
