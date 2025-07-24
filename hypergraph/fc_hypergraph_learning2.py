@@ -497,6 +497,8 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
 
         self.W_recon = nn.Parameter(torch.ones(num_hyperedges))
 
+        self.comb = nn.Linear(hidden_size, int(hidden_size/2))
+
         self._initialize_weights()
 
     def gumbel_softmax_sample(self, logits):
@@ -511,7 +513,7 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
             input_x = data.view(-1, self.roi, self.roi)
 
         # ======== GENERACIÓN DE H ========
-        _, output, _ = self.transformer(input_x)
+        _, output, graph_vector = self.transformer(input_x)
         output = self.dropout(input_x)
         output, attn_weights = self.transformer2(output)
         x = output.permute(0, 2, 1)
@@ -570,6 +572,12 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
         x_max = torch.max(x, dim=1)[0]
         x_g = torch.cat([x_mean, x_max], dim=1)
         x = self.dropout(x_g)
+
+        """x = self.comb(x)
+        x = self.activation(x)
+        x = self.dropout(x)
+
+        x = torch.cat([x, graph_vector], dim=1)  # Concatenar vector de grafo"""
 
         x = self.embeddingFinal(x)
 
@@ -698,7 +706,7 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
 
         entropy_reg = entropy_loss(pred[0])
 
-        #recon_loss = self.recon_loss(pred[0], kwargs.get('x').view(-1, self.roi, self.roi))
+        recon_loss = self.recon_loss(pred[0], kwargs.get('x').view(-1, self.roi, self.roi))
         contr_loss = self.contrastive_loss(pred[0], y)
         contr_loss2 = self.contrastive_loss2(pred[3], y)
         #weight_loss = pred[0].mean()
@@ -710,7 +718,7 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
             print(f"Entropy loss: {entropy_reg.item():.4f}")
             print(f"Reconstruction loss: {recon_loss.item():.4f}")
 
-        return 1 * class_loss + 0 * contr_loss * 0.5*contr_loss2 + 0.5*entropy_reg #+ 0.25*recon_loss
+        return 1 * class_loss + 0.1 * contr_loss * 0.5*contr_loss2 + 0.5*entropy_reg #+ 0.25*recon_loss
 
     @staticmethod
     def plot_corr(x, suffix='', vmin=0):
