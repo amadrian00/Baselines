@@ -106,8 +106,8 @@ class BrainNetworkTransformer(BaseModel):
             nn.LeakyReLU(),
             nn.Linear(256, 32),
             nn.LeakyReLU(),
-            nn.Linear(32, 1)
-        )
+            )
+        self.clf = nn.Linear(32, 1)
 
     def forward(self,
                 node_feature: torch.tensor):
@@ -122,8 +122,9 @@ class BrainNetworkTransformer(BaseModel):
             node_feature, assignment = atten(node_feature)
 
         nf = self.dim_reduction(node_feature)
+        nf = self.fc(nf.reshape((bz, -1)))
 
-        return self.fc(nf.reshape((bz, -1))), node_feature, assignment
+        return self.clf(nf), node_feature, nf
 
     def get_attention_weights(self):
         return [atten.get_attention_weights() for atten in self.attention_list]

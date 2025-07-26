@@ -19,7 +19,7 @@ from torch_geometric.loader import DataLoader as DataLoaderG
 from brain_encoding.fc_hypergraph import FCHypergraph, create_hyperedges
 from torcheval.metrics import BinaryAUROC, BinaryF1Score, BinaryRecall, BinaryConfusionMatrix, BinaryAccuracy
 import torch.nn.functional as F
-from .bnt import BrainNetworkTransformer
+from sklearn.metrics import roc_curve
 
 def prepare_dataloader(graphs, batch_size, shuffle=False):
     if type(graphs.dataset) == FCHypergraph:
@@ -170,9 +170,6 @@ class FCHypergraphLearning(torch.nn.Module):
         self.num_layers = num_layers
         self.seq_len = seq_len
 
-        self.tau = 1.0
-        self.anneal_rate = 0.99
-        self.min_tau = 0.1
 
         if custom_layer:
             self.conv1 = HypergraphConvLayer(in_size, hidden_size, use_attention=False)
@@ -354,8 +351,6 @@ class FCHypergraphLearning(torch.nn.Module):
             self.train()
             epoch_loss = 0
 
-            self.tau = max(self.min_tau, self.tau * self.anneal_rate)
-
             for batch in dataloaders['train']:
                 batch= batch.to(self.device)
 
@@ -447,43 +442,35 @@ class FCHypergraphLearning(torch.nn.Module):
             plt.clf()
             plt.close()
 
+            all_probs = []
+            all_labels = []
+            for batch in dataloaders['test']:
+                batch = batch.to(self.device)
+                logits = self(batch)[1]
+                probs = torch.sigmoid(logits).view(-1)
+                labels = batch['y'].view(-1)
+                all_probs.append(probs.detach().cpu())
+                all_labels.append(labels.detach().cpu())
+
+            probs = torch.cat(all_probs).numpy()
+            labels = torch.cat(all_labels).numpy()
+            fpr, tpr, thresholds = roc_curve(labels, probs)
+
+            plt.figure()
+            plt.plot(fpr, tpr, label=f'AUROC = {metrics["test_AUC"]:.4f}')
+            plt.plot([0, 1], [0, 1], linestyle='--', color='grey')
+            plt.xlabel('False Positive Rate')
+            plt.ylabel('True Positive Rate')
+            plt.title('Receiver Operating Characteristic (ROC)')
+            plt.legend(loc='lower right')
+            plt.grid(alpha=0.3)
+            plt.tight_layout()
+            plt.savefig(f"hypergraph/hypergraph_learning_data/roc_curve_fc_{self.type}.svg", format='svg', dpi=1200)
+            plt.clf()
+            plt.close()
+
         torch.save(self.state_dict(), 'proposed_model.pth')
         return metrics
-
-class BrainAttentionLayer(nn.Module):
-    def __init__(self, axis_dim, dropout, num_hyperedges):
-        super(BrainAttentionLayer, self).__init__()
-        self.axis_dim = axis_dim
-        self.attn = nn.MultiheadAttention(embed_dim=axis_dim, num_heads=4, dropout=dropout, batch_first=True)
-        self.norm = nn.LayerNorm(axis_dim)
-        self.learnable_query  = nn.Parameter(torch.randn(num_hyperedges, self.axis_dim))
-
-
-    def forward(self, x):
-        attn_output, attn_weights = self.attn(query=self.learnable_query.unsqueeze(0).expand(x.size(0), -1, -1), key=x, value=x)
-        attn_output = self.norm(attn_output)
-        return attn_output, attn_weights
-
-class BrainAttentionModel(nn.Module):
-    def __init__(self, num_rois=200, num_hyperedges=10, num_layers=1, dropout=0):
-        super(BrainAttentionModel, self).__init__()
-        self.axis_dim = num_rois
-        self.num_hyperedges = num_hyperedges
-
-
-        self.layers = nn.ModuleList([
-            BrainAttentionLayer(self.axis_dim, dropout, num_hyperedges) for _ in range(num_layers)
-        ])
-
-    def forward(self, fc_matrix):
-        x = fc_matrix
-        attn_weights_all = []
-
-        for layer in self.layers:
-            x, attn_weights = layer(x)  # queries fijos en todas las capas
-            attn_weights_all.append(attn_weights)
-
-        return x, attn_weights_all
 
 class CorrelationToIncidenceTransformer(FCHypergraphLearning):
     def __init__(self, num_hyperedges, in_size, hidden_size, seq_len, num_heads, num_layers, dropout, device, y):
@@ -492,35 +479,34 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
         self.type = 'incidence_static'
         self.num_hyperedges = num_hyperedges
 
-        self.transformer = BrainNetworkTransformer()
-        self.transformer2 = BrainAttentionModel(num_hyperedges=num_hyperedges, dropout=dropout)
+        self.transformer_encoder = nn.TransformerEncoder(
+                                        nn.TransformerEncoderLayer(d_model=in_size, nhead=num_heads, dropout=dropout,
+                                                                   activation='gelu',
+                                                                   dim_feedforward=in_size * 4, batch_first=True),
+                                        num_layers=num_layers,
+                                        norm=nn.LayerNorm(in_size))
+        self.fc = nn.Linear(in_size*in_size, in_size*num_hyperedges)
 
-        self.W_recon = nn.Parameter(torch.ones(num_hyperedges))
-
-        self.comb = nn.Linear(hidden_size, int(hidden_size/2))
+        self.param = nn.Parameter(torch.Tensor([0.0]).repeat(self.num_hyperedges), requires_grad=True)
 
         self._initialize_weights()
-
-    def gumbel_softmax_sample(self, logits):
-        U = torch.rand_like(logits)
-        gumbel = -torch.log(-torch.log(U + 1e-9) + 1e-9)
-        return torch.softmax((logits + gumbel) / self.tau, dim=-1)
 
     def forward(self, data):
         try:
             input_x = data.x.view(-1, self.roi, self.roi)
         except:
             input_x = data.view(-1, self.roi, self.roi)
+        batch_size = input_x.shape[0]
 
-        # ======== GENERACIÓN DE H ========
-        _, output, graph_vector = self.transformer(input_x)
-        output = self.dropout(input_x)
-        output, attn_weights = self.transformer2(output)
-        x = output.permute(0, 2, 1)
-        incidence_matrix = self.gumbel_softmax_sample(x)
+        x = self.transformer_encoder(input_x)
+        x = self.dropout(x)
+        x = self.fc(x.view(x.shape[0], -1)).view(-1, self.roi, self.num_hyperedges)
+
+        incidence_matrix_sig = torch.sigmoid(x)
+        incidence_matrix = torch.relu(incidence_matrix_sig-torch.sigmoid(self.param))
 
         # ======== DEBUG OPCIONAL ========
-        if self.show:
+        if False and self.training or self.show:
             print("     \n[INCIDENCE STATS]")
             #print("         Batch mean incidence:", incidence_matrix.mean(dim=(1, 2)))
             print("         [DEBUG] H.std()", incidence_matrix.std().item())
@@ -535,10 +521,26 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
                 l1_diff.append(torch.abs(h1 - h2).mean().item())
             print("         Mean Cosine Similarity:", sum(cos_sim) / len(cos_sim))
             print("         Mean L1 Difference:", sum(l1_diff) / len(l1_diff))
+            labels = data.y if hasattr(data, 'y') else None
+            for label_value in torch.unique(labels):
+                idx = (labels == label_value).nonzero(as_tuple=True)[0]
+                cos_sim = []
+                l1_diff = []
+                for i in range(len(idx) - 1):
+                    h1 = incidence_matrix[idx[i]].flatten()
+                    h2 = incidence_matrix[idx[i + 1]].flatten()
+                    cos_sim.append(F.cosine_similarity(h1, h2, dim=0).item())
+                    l1_diff.append(torch.abs(h1 - h2).mean().item())
+                if cos_sim:
+                    print(f"         Label {label_value.item()} Mean Cosine Similarity:",
+                          sum(cos_sim) / len(cos_sim))
+                    print(f"         Label {label_value.item()} Mean L1 Difference:", sum(l1_diff) / len(l1_diff))
 
-        # ======== TEST TIME VISUALIZACIÓN ========
+        input_x = torch.eye(self.roi).unsqueeze(0).repeat(input_x.shape[0], 1, 1).to(self.device)
+
         if self.finished_training:
             incidence_matrix = incidence_matrix.detach()
+            incidence_matrix = incidence_matrix/ incidence_matrix.amax(dim=(1, 2), keepdim=True)
             self.plot_corr(input_x[0], "_origin")
             self.plot_corr(x[0], '_fc', -1)
             self.plot_corr(incidence_matrix[0], '_activation')
@@ -554,171 +556,34 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
                                   f"Average: {torch.mean(hyperedge_degrees).item():.2f}")
             plt.close()
 
-        # ======== DROPOUT PRE-GNN ========
+
+
+        incidence_matrix_d = self.dropout(incidence_matrix)
         input_x = self.dropout(input_x)
 
-
-        emb1 = self.conv1(input_x, incidence_matrix)
+        emb1 = self.conv1(input_x, incidence_matrix_d)
         emb1 = emb1.view(-1, emb1.shape[2])
         x = self.bn1(emb1).view(-1, self.roi, emb1.shape[1])
         x = self.activation(x)
 
-        emb2 = self.conv2(x, incidence_matrix)
+        emb2 = self.conv2(x, incidence_matrix_d)
         emb2 = emb2.view(-1, emb2.shape[2])
         x = self.bn2(emb2).view(-1, self.roi, emb2.shape[1])
 
-        # ======== POOLING Y CLASIFICADOR (también bloqueado si warmup) ========
         x_mean = torch.mean(x, dim=1)
         x_max = torch.max(x, dim=1)[0]
-        x_g = torch.cat([x_mean, x_max], dim=1)
-        x = self.dropout(x_g)
-
-        """x = self.comb(x)
-        x = self.activation(x)
+        x = torch.cat([x_mean, x_max], dim=1)
         x = self.dropout(x)
-
-        x = torch.cat([x, graph_vector], dim=1)  # Concatenar vector de grafo"""
 
         x = self.embeddingFinal(x)
 
-        return incidence_matrix, x, input_x, x_g
-
-    def contrastive_loss2(self, x, labels, margin=1.0):
-        """
-        x: [B, D] embeddings
-        labels: [B] etiquetas (0 o 1)
-        margin: margen para los negativos
-        """
-        B = x.size(0)
-
-        # Expandimos para pares (i, j)
-        x_i = x.unsqueeze(1)  # [B, 1, D]
-        x_j = x.unsqueeze(0)  # [1, B, D]
-
-        # Distancias euclídeas entre todos los pares
-        dists = torch.norm(x_i - x_j, dim=-1)  # [B, B]
-
-        # Creamos la máscara de pares positivos y negativos
-        labels_i = labels.unsqueeze(1)  # [B, 1]
-        labels_j = labels.unsqueeze(0)  # [1, B]
-
-        same_class = (labels_i == labels_j).float()  # [B, B]
-        diff_class = 1.0 - same_class  # [B, B]
-
-        # Evitamos la diagonal (pares idénticos)
-        mask_offdiag = ~torch.eye(B, dtype=torch.bool, device=x.device)
-        same_class = same_class * mask_offdiag
-        diff_class = diff_class * mask_offdiag
-        dists = dists * mask_offdiag
-
-        # Pérdida contrastiva:
-        pos_loss = (same_class * dists.pow(2)).sum()
-        neg_loss = (diff_class * torch.clamp(margin - dists, min=0).pow(2)).sum()
-
-        # Normalizamos
-        num_pos = same_class.sum().clamp(min=1)
-        num_neg = diff_class.sum().clamp(min=1)
-
-        loss = (pos_loss / num_pos) + (neg_loss / num_neg)
-        return loss
-
-    def js_divergence(self, p, q, eps=1e-8):
-        """
-        Jensen-Shannon divergence entre dos distribuciones p y q,
-        con p,q shape = [dim] y valores >=0 que suman 1.
-        """
-        m = 0.5 * (p + q)
-        p_log = torch.log(p + eps)
-        q_log = torch.log(q + eps)
-        m_log = torch.log(m + eps)
-        return 0.5 * (torch.sum(p * (p_log - m_log), dim=-1) + torch.sum(q * (q_log - m_log), dim=-1))
-
-    def contrastive_loss(self, H, labels, margin=1.0):
-        # H: [B, N, E], distribuciones fila a fila (softmax)
-        B, N, E = H.shape
-
-        # Expand dimensiones para pares (broadcast)
-        H_i = H.unsqueeze(1)  # [B,1,N,E]
-        H_j = H.unsqueeze(0)  # [1,B,N,E]
-
-        # Calcular JS divergencia para cada par y fila
-        # Resultado shape: [B,B,N]
-        js_per_row = self.js_divergence(H_i, H_j)  # vectorizado sobre último eje E
-
-        # Promediar sobre filas (nodos) para un único valor por par
-        dist = js_per_row.mean(dim=2)  # [B,B]
-
-        # Máscaras de clase
-        labels = labels.view(-1, 1)  # [B,1]
-        same_class = (labels == labels.T).float()  # [B,B]
-        diff_class = 1.0 - same_class  # [B,B]
-
-        # Máscara para ignorar diagonal (pares i==j)
-        mask = ~torch.eye(B, dtype=torch.bool, device=H.device)
-
-        # Pérdida positiva (pares mismos labels)
-        pos_loss = (dist * same_class)[mask].sum()
-
-        # Pérdida negativa (pares diferentes labels)
-        neg_loss = (F.relu(margin - dist) * diff_class)[mask].sum()
-
-        total_pairs = B * (B - 1)
-
-        loss = (pos_loss + neg_loss) / total_pairs
-
-        return loss
-
-    def recon_loss(self, H, FC):
-        W = torch.diag(self.W_recon)
-        S = H @ W @ H.transpose(1, 2)  # [B, N, N]
-
-        alpha = 0.5
-        beta = 0.5
-
-        # Flatten para correlación
-        S_flat = S.view(S.size(0), -1)
-        FC_flat = FC.view(FC.size(0), -1)
-
-        S_mean = S_flat.mean(dim=1, keepdim=True)
-        FC_mean = FC_flat.mean(dim=1, keepdim=True)
-
-        S_centered = S_flat - S_mean
-        FC_centered = FC_flat - FC_mean
-
-        numerator = (S_centered * FC_centered).sum(dim=1)
-        denominator = torch.sqrt((S_centered ** 2).sum(dim=1)) * torch.sqrt((FC_centered ** 2).sum(dim=1))
-        corr = numerator / (denominator + 1e-8)
-
-        # Pérdida de primer orden: 1 - correlación
-        loss_corr = 1 - corr.mean()
-
-        # Pérdida de segundo orden: similitud entre perfiles de conectividad
-        S_norm = F.normalize(S, p=2, dim=-1)
-        FC_norm = F.normalize(FC, p=2, dim=-1)
-        sim_S = S_norm @ S_norm.transpose(1, 2)
-        sim_FC = FC_norm @ FC_norm.transpose(1, 2)
-        loss_second_order = F.mse_loss(sim_S, sim_FC)
-
-        return alpha * loss_corr + beta * loss_second_order
+        return incidence_matrix, x, input_x, x
 
     def loss(self, pred, y: Tensor, **kwargs):
         class_loss = self.loss_fn(pred[1], y.type_as(pred[1]).view_as(pred[1]))
 
-        entropy_reg = entropy_loss(pred[0])
-
-        recon_loss = self.recon_loss(pred[0], kwargs.get('x').view(-1, self.roi, self.roi))
-        contr_loss = self.contrastive_loss(pred[0], y)
-        contr_loss2 = self.contrastive_loss2(pred[3], y)
-        #weight_loss = pred[0].mean()
-
-        if self.show:
-            print("\n[LOSS COMPONENTS]")
-            print(f"Class 1 loss: {class_loss.item():.4f}")
-            #print(f"Class 2 loss: {class_loss2.item():.4f}")
-            print(f"Entropy loss: {entropy_reg.item():.4f}")
-            print(f"Reconstruction loss: {recon_loss.item():.4f}")
-
-        return 1 * class_loss + 0.1 * contr_loss * 0.5*contr_loss2 + 0.5*entropy_reg #+ 0.25*recon_loss
+        total_weight = pred[0].mean()
+        return class_loss + total_weight # 0*contrast_loss
 
     @staticmethod
     def plot_corr(x, suffix='', vmin=0):
@@ -729,8 +594,3 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
         plt.colorbar(cax)
         plt.savefig(f"correlation_matrix{suffix}.svg", format="svg", bbox_inches="tight")
         plt.close()
-
-
-def entropy_loss(H):
-    H = torch.clamp(H, 1e-8, 1 - 1e-8)
-    return -(H * H.log()).sum(dim=-1).mean()
