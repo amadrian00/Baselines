@@ -12,7 +12,8 @@ def prepare_dataloader(graphs, batch_size, shuffle=False):
     return DataLoader(graphs, batch_size=batch_size, drop_last=False, shuffle=shuffle)
 
 def get_folds(n_folds, n_repeats, batch_size, device):
-    whole_dataset = FCHypergraph(get_dataframe(), torch_device=device)
+
+    whole_dataset = FCHypergraph(get_dataframe("ABIDE"), torch_device=device)
 
     kf = RepeatedStratifiedKFold(n_splits=n_folds, n_repeats=n_repeats, random_state=42)
     strat_split = StratifiedShuffleSplit(n_splits=1, test_size=0.1, random_state=42)

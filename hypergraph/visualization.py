@@ -2,6 +2,8 @@ import re
 import torch
 import pandas as pd
 import numpy as  np
+from collections import Counter
+from collections import defaultdict
 import matplotlib.pyplot as plt
 from pycircos import Gcircle, Garc
 from matplotlib.lines import Line2D
@@ -54,6 +56,10 @@ def plot_full_heatmaps(matrices, suffix):
 
 def plot_full_heatmap(matrix, suffix):
     matrix = np.array(matrix)
+    if np.max(matrix) == np.min(matrix):
+        matrix = np.zeros_like(matrix)
+    else:
+        matrix = (matrix - np.min(matrix)) / (np.max(matrix) - np.min(matrix))
 
     fig, ax = plt.subplots(figsize=(20, 20))
     cax = ax.matshow(matrix, cmap='viridis', aspect='auto')
@@ -68,13 +74,15 @@ class HypergraphPlotter():
     def __init__(self):
         self.incidence_accumulator, self.incidence_accumulator_neg = [], []
         self.k_accumulator, self.k_accumulator_neg = [], []
-        self.analytical_accumulator, self.analytical_accumulator_neg = [], []
         self.fc_accumulator, self.fc_accumulator_neg = [], []
 
         self.df= pd.read_csv('hypergraph/CC200_ROI_labels.csv')
         self.roi_names = []
 
         self.roi = 200
+
+        self.connectivity_patterns =  []
+        self.connectivity_patterns_control =  []
 
         for idx, row in self.df.iterrows():
             aal = row['AAL']
@@ -89,13 +97,13 @@ class HypergraphPlotter():
             else:
                 self.roi_names.append('None')
 
-    def add_resuls(self, hgl, data):
+    def add_results(self, hgl, data):
         for batch in data:
             for k in batch.keys():
                 batch[k] = batch[k].to(device)
-            im, logits, _ = hgl(batch)
+            im, logits, _, _ = hgl(batch)
 
-            correct_mask = (logits > hgl.threshold).long() == batch.y
+            correct_mask = (logits > hgl.best_threshold).long() == batch.y
             correct_indices = torch.nonzero(correct_mask, as_tuple=True)[0].detach().cpu()
 
             im = im.detach().cpu()
@@ -107,31 +115,35 @@ class HypergraphPlotter():
             indices_not = indices_not[torch.isin(indices_not, correct_indices)]
 
             knn = to_dense_adj(batch.hyperedge_index, batch.batch, max_num_nodes=200).detach().cpu()
-            analy = batch.analytical_hyperedge.view(-1, self.roi, self.roi*2).detach().cpu()
             fc = batch.x.view(-1,  self.roi,  self.roi).detach().cpu()
 
             plot_full_heatmap(im[indices[1]], 'proposed/example')
             plot_full_heatmap(knn[indices[1]], 'knn/example')
-            plot_full_heatmap(analy[indices[1]], 'analytic/example')
             plot_full_heatmap(fc[indices[1]], 'fc/example')
 
             if len(indices) > 0:
-                self.incidence_accumulator.extend([im[i] for i in indices])
+                im_matrices = [im[i] for i in indices]
+
+                self.incidence_accumulator.extend(im_matrices)
                 self.k_accumulator.extend([knn[i] for i in indices])
-                self.analytical_accumulator.extend([analy[i] for i in indices])
                 self.fc_accumulator.extend([fc[i] for i in indices])
 
+                self.find_patterns(im_matrices, self.connectivity_patterns)
+
             if len(indices_not) > 0:
-                self.incidence_accumulator_neg.extend([im[i] for i in indices_not])
+                im_matrices = [im[i] for i in indices_not]
+
+                self.incidence_accumulator_neg.extend(im_matrices)
                 self.k_accumulator_neg.extend([knn[i] for i in indices_not])
-                self.analytical_accumulator_neg.extend([analy[i] for i in indices_not])
                 self.fc_accumulator_neg.extend([fc[i] for i in indices_not])
 
+                self.find_patterns(im_matrices, self.connectivity_patterns_control)
+
     def plot(self):
-        graph_type = ['proposed', 'knn', 'analytic', 'fc']
-        positive_sources = [self.incidence_accumulator, self.k_accumulator, self.analytical_accumulator,
+        graph_type = ['proposed', 'knn', 'fc']
+        positive_sources = [self.incidence_accumulator, self.k_accumulator,
                             self.fc_accumulator]
-        negative_sources = [self.incidence_accumulator_neg, self.k_accumulator_neg, self.analytical_accumulator_neg,
+        negative_sources = [self.incidence_accumulator_neg, self.k_accumulator_neg,
                             self.fc_accumulator_neg]
 
         for name, pos_src, neg_src in zip(graph_type, positive_sources, negative_sources):
@@ -145,10 +157,10 @@ class HypergraphPlotter():
             plot_full_heatmap(difference, f'{name}/difference')
 
             plot_full_heatmaps([positive_mean, negative_mean, difference], f'{name}/joined')
-            if name == 'proposed':
-                self.write_csv(difference)
+            self.write_csv(difference, name)
 
-            self.plot_circos(positive_mean,f'{name}/disease')
+            used_hyperedges = self.plot_circos(positive_mean,f'{name}/disease')
+            plot_legend(used_hyperedges, f'{name}_disease_legend')
 
             diff_min = difference.min()
             diff_max = difference.max()
@@ -156,10 +168,15 @@ class HypergraphPlotter():
                 diff_norm = (difference - diff_min) / (diff_max - diff_min)
                 diff_scaled = diff_norm * 2 - 1
 
-                self.plot_circos(negative_mean, f'{name}/negative')
-                self.plot_circos(diff_scaled, f'{name}/difference')
+                used_hyperedges = self.plot_circos(negative_mean, f'{name}/negative')
+                plot_legend(used_hyperedges, f'{name}_negative_legend')
+                used_hyperedges = self.plot_circos(diff_scaled, f'{name}/difference')
+                plot_legend(used_hyperedges, f'{name}_difference_legend')
 
-        plot_legend(self.incidence_accumulator[0].shape[0],'legend')
+            plot_legend(used_hyperedges, f'{name}_legend')
+
+        self.get_most_common_patterns(self.connectivity_patterns)
+        self.get_most_common_patterns(self.connectivity_patterns_control, "control ")
 
     def plot_circos(self, incidence_matrix, suffix):
         assert incidence_matrix.dim() == 2, "Tensor must be 2D (n_rois, n_hyperedges)"
@@ -174,7 +191,7 @@ class HypergraphPlotter():
         all_values = torch.abs(incidence_matrix)
         flattened_values = all_values.view(-1)
 
-        k = int(0.0025 * flattened_values.shape[0])
+        k = int(0.005 * flattened_values.shape[0])
         top_values, top_indices = torch.topk(flattened_values, k)
 
         rows = top_indices // incidence_matrix.shape[1]
@@ -190,17 +207,19 @@ class HypergraphPlotter():
         for i in selected_indices.tolist():
             if i < 200:
                 roi = self.roi_names[i]
-                circle.add_garc(
-                    Garc(
-                        arc_id=roi,
-                        interspace=0.5,
-                        raxis_range=(950, 1000),
-                        facecolor=colorlist[i % 36],
-                        label_visible=True
-                    )
+                if roi != 'None':
+                    circle.add_garc(
+                        Garc(
+                            arc_id=roi,
+                            interspace=0.5,
+                            raxis_range=(950, 1000),
+                            facecolor=colorlist[i % 36],
+                            label_visible=True
+                        )
         )
 
         circle.set_garcs()
+        used_hyperedges = {}
         for hyperedge_idx in range(n_hyperedges):
             connected_indices = torch.where(mask[:, hyperedge_idx])[0]
 
@@ -208,36 +227,41 @@ class HypergraphPlotter():
             if match.group(1) != 'proposed':
                 connected_indices = torch.cat((connected_indices, torch.tensor([hyperedge_idx%incidence_matrix.shape[0]])))
 
+            drawn = False
+            color = edgecolors[hyperedge_idx % len(edgecolors)]
             for i in range(len(connected_indices)):
                 for j in range(i + 1, len(connected_indices)):
                     roi_start = self.roi_names[connected_indices[i].item()]
                     roi_end = self.roi_names[connected_indices[j].item()]
 
-                    source = (roi_start, 0, 180, 950)
-                    destination = (roi_end, 0, 180, 950)
+                    if roi_start != 'None' and roi_end != 'None':
+                        source = (roi_start, 0, 180, 950)
+                        destination = (roi_end, 0, 180, 950)
 
-                    circle.chord_plot(source,destination, edgecolor=edgecolors[hyperedge_idx%len(edgecolors)])
+                        circle.chord_plot(source,destination, edgecolor=color)
+                        drawn = True
+            if drawn: used_hyperedges[hyperedge_idx] = color
 
         circle.figure.savefig(f"images/{suffix}_circos.svg", format="svg", bbox_inches="tight")
         circle.figure.savefig(f"images/{suffix}_circos.png", format="png")
+        return used_hyperedges
 
-    def write_csv(self, difference):
-        positions = torch.nonzero(abs(difference) > 0.02, as_tuple=False)
-        values = difference[positions[:, 0], positions[:, 1]]
-
-        expected_columns = ['AAL', 'Eickhoff-Zilles', 'Talairach-Tournoux', 'Harvard-Oxford']
-
+    def write_csv(self, difference, name):
+        expected_columns = ['AAL', 'Eickhoff-Zilles', 'Talairach-Tournoux', 'Harvard-Oxford', ' center of mass']
         data = []
-        for row, col, val in zip(positions[:, 0], positions[:, 1], values):
-            row_idx = row.item()
-            label_info = self.df.loc[row_idx, expected_columns]
-            entry = {
-                'Row': row_idx,
-                'Col': col.item(),
-                'Val': val.item()
-            }
-            entry.update(label_info.to_dict())
-            data.append(entry)
+        difference = abs(difference)
+        for i in range(difference.shape[0]):
+            for j in range(difference.shape[1]):
+                val = difference[i, j]
+                row_info = self.df.loc[i, expected_columns]
+                entry = {
+                    'ROI': i,
+                    'Hyperedge': j,
+                    'Val': val.item() if hasattr(val, 'item') else val,
+                    **row_info.to_dict()
+                }
+                data.append(entry)
+
 
         if len(data) > 0:
             result_df = pd.DataFrame(data)
@@ -246,15 +270,84 @@ class HypergraphPlotter():
             for col in columns_to_clean:
                 result_df[col] = result_df[col].apply(extract_keys)
 
-            result_df.to_csv('images/roi_difference.csv', index=False)
+            result_df['Val_Normalized'] = result_df.groupby('ROI')['Val'].transform(
+                lambda x: x / x.sum() if x.sum() != 0 else 0
+            )
+
+            result_df.to_csv(f'images/roi_difference_{name}.csv', index=False)
+
+    def find_patterns(self, matrices, list_data, k=5):
+        patterns = defaultdict(list)
+
+        for idx_matrix, mat in enumerate(matrices):
+            mat_T = mat.T
+            topk_indices = torch.topk(mat_T, k=k, dim=1).indices
+            top_sets = [frozenset(row.tolist()) for row in topk_indices]
+            for idx_col, s in enumerate(top_sets):
+                patterns[s].append((idx_matrix, idx_col))
+
+        list_data.extend(patterns)
+
+    def get_most_common_patterns(self, patterns, control='', threshold=3):
+        element_to_indices = defaultdict(set)
+
+        for i, pattern in enumerate(patterns):
+            for element in pattern:
+                element_to_indices[element].add(i)
+
+        n = len(patterns)
+        used = set()
+        groups = []
+
+        for i in range(n):
+            if i in used:
+                continue
+            p1 = patterns[i]
+            candidate_indices = set()
+            for element in p1:
+                candidate_indices.update(element_to_indices[element])
+            candidate_indices -= used
+            candidate_indices.discard(i)
+
+            current_group = [p1]
+            used.add(i)
+
+            for j in candidate_indices:
+                if j in used:
+                    continue
+                p2 = patterns[j]
+                if len(p1 & p2) >= threshold:
+                    current_group.append(p2)
+                    used.add(j)
+
+            groups.append(current_group)
+
+        if not groups:
+            print("No pattern groups found.")
+            return []
+
+        groups.sort(key=len, reverse=True)
+        most_common_groups = groups[0:3]
+
+        for most_common_group in most_common_groups:
+            frequency = len(most_common_group)
+            print(f"Most common pattern {control}group (≥{threshold}/5 overlap): {frequency} occurrences")
+
+            for pattern in most_common_group:
+                print([self.roi_names[element] for element in pattern])
+            print()
+
+
 
 def extract_keys(text):
     keys = re.findall(r'\"([^\"]+)\":', text)
     return ", ".join(keys)
 
-def plot_legend(n_hyperedges, suffix, cols=4):
-    handles = [Line2D([0], [1], color=edgecolors[hyperedge%len(edgecolors)], lw=3) for hyperedge in range(n_hyperedges)]
-    labels = [f'Hyperedge {i + 1}' for i in range(n_hyperedges)]
+def plot_legend(hyperedges, suffix, cols=4):
+    sorted_hyperedges = sorted(hyperedges.items())  # Lista de tuplas (idx, color)
+
+    handles = [Line2D([0], [1], color=color, lw=3) for _, color in sorted_hyperedges]
+    labels = [f'Hyperedge {idx + 1}' for idx, _ in enumerate(sorted_hyperedges)]
 
     fig, ax = plt.subplots()
     ax.axis('off')

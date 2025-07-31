@@ -11,11 +11,15 @@ from torch_geometric.nn.conv import HypergraphConv, GATConv, GCNConv, SAGEConv
 from torch_geometric.nn.pool import global_max_pool, global_mean_pool
 from torcheval.metrics import BinaryAUROC, BinaryF1Score, BinaryRecall, BinaryConfusionMatrix, BinaryAccuracy
 
+from hypergraph.bnt import BrainNetworkTransformer
+from hypergraph.brainnetcnn import BrainNetCNN
+
 class FCHypergraphLearning(torch.nn.Module):
-    def __init__(self, in_size, hidden_size, dropout, device, y: Tensor, num_hyperedges, name):
+    def __init__(self, in_size, hidden_size, dropout, device, y: Tensor, num_hyperedges, name, fold):
         super(FCHypergraphLearning, self).__init__()
 
         self.name = name
+        self.fold = fold
 
         self.device = device
         self.activation = nn.SiLU()
@@ -43,11 +47,16 @@ class FCHypergraphLearning(torch.nn.Module):
             in_size = in_size
             self.conv1 = HypergraphConv(in_size, hidden_size) #Hyper-Attn
             self.conv2 = HypergraphConv(hidden_size, int(hidden_size/2))
+        elif name == 'btf':
+            self.conv1 = BrainNetworkTransformer()
+        elif name == 'brainnetcnn':
+            self.conv1 = BrainNetCNN()
         else:
             self.conv1 = HypergraphConv(in_size, hidden_size) #Hyper-Attn
             self.conv2 = HypergraphConv(hidden_size, int(hidden_size/2))
 
-        self.bn1 = nn.BatchNorm1d(num_features=hidden_size)
+        self.bn1 = nn.BatchNorm1d(hidden_size)
+        self.bn2 = nn.BatchNorm1d(hidden_size)
 
         self.embeddingFinal = nn.Linear(int(hidden_size), 1)
 
@@ -71,9 +80,16 @@ class FCHypergraphLearning(torch.nn.Module):
                 torch.nn.init.ones_(m.weight)
                 torch.nn.init.zeros_(m.bias)
 
+            elif isinstance(m, (GCNConv, GATConv)):
+                torch.nn.init.xavier_uniform_(m.lin.weight)
+                if m.lin.bias is not None:
+                    torch.nn.init.zeros_(m.lin.bias)
+
     def forward(self, data):
         batch = data.batch
         input_x = data.x
+        #No feats (supplementary materials)
+        input_x = data.eye
 
         if self.name == 'knn':
             hyperedge_index = data.hyperedge_index
@@ -87,29 +103,40 @@ class FCHypergraphLearning(torch.nn.Module):
         elif self.name == "k-random":
             hyperedge_index = data.random_hyperedge_index
             weights = data.random_hyperedge_weight
-        elif self.name == 'gat' or self.name == 'gsage' or self.name == 'gcn':
+        elif self.name in {'gat', 'gsage', 'gcn'}:
             hyperedge_index = data.edge_index
             weights = data.weight
         elif self.name == 'thfcn':
             hyperedge_index = data.thfcn_index
             weights = data.thfcn_weight
         elif self.name == 'proposed':
-            hyperedge_index = data.proposed_hyperedge_index.view(-1,200,self.num_hyperedges)
-            hyperedge_index, weights = dense_to_sparse(hyperedge_index)
-
+            hyperedge_index = data.proposed_hyperedge_index
+            weights = data.proposed_weight
+        elif self.name == 'btf' or self.name == 'brainnetcnn':
+            input_x = input_x.view(-1, self.roi, self.roi)
+            if self.name == 'btf':
+                x = self.conv1(input_x)[0]
+            else:
+                x = self.conv1(input_x)
+            return x
         else:
             raise ValueError(
                 f"Invalid 'name' provided: {self.name}. Must be 'knn', 'ts-modelling', 'fc-modelling', or 'k-random'.")
 
-        x = self.conv1(input_x, hyperedge_index, weights) #Remove weights if using GraphSAGE
+        if self.name!= 'gsage': x = self.conv1(input_x, hyperedge_index, weights)
+        else : x = self.conv1(input_x, hyperedge_index)
         x = self.bn1(x)
         x = self.activation(x)
 
-        x = self.conv2(x, hyperedge_index, weights)
+        if self.name!= 'gsage': x = self.conv2(x, hyperedge_index, weights)
+        else: x = self.conv2(x, hyperedge_index)
 
         x_mean = global_mean_pool(x, batch)
         x_max = global_max_pool(x, batch)
         x = torch.cat([x_mean, x_max], dim=1)
+
+        x = self.bn2(x)
+        x = self.dropout(x)
 
         x = self.embeddingFinal(x)
 
@@ -256,6 +283,14 @@ class FCHypergraphLearning(torch.nn.Module):
         self.eval()
 
         metrics = self.test(dataloaders, find_threshold=True)
+
+        results = []
+        for batch in dataloaders['test']:
+            batch = batch.to(self.device)
+            output = self(batch).detach().cpu().numpy()
+            results.append(output)
+
+        np.save(f"preds/fc_{self.name}_hyper_{self.fold}.npy", np.array(results))
 
         tqdm.write(f"       Best Model at Iteration {best_it:d}: Train: {metrics['train_Accuracy']:.4f}, "
                     f"Val: {metrics['val_Accuracy']:.4f}, Test: {metrics['test_Accuracy']:.4f}")

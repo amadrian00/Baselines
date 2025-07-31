@@ -4,9 +4,11 @@ Adrián Ayuso Muñoz 2024-12-11.
 Class of the hypergraph_learning submodule.
     Receives the hypergraph as input and returns the inter-features.
 """
+import numpy as np
+import os
 import copy
 import torch
-from torch_geometric.utils import to_dense_adj
+from sklearn.manifold import TSNE
 from tqdm import tqdm
 import torch.nn as nn
 from torch import Tensor
@@ -150,11 +152,13 @@ class AttentionPooling(nn.Module):
         return x_pooled
 
 class FCHypergraphLearning(torch.nn.Module):
-    def __init__(self, in_size, hidden_size, seq_len, num_layers, dropout, device, y: Tensor, custom_layer=True):
+    def __init__(self, in_size, hidden_size, seq_len, num_layers, dropout, device, y: Tensor, custom_layer=True, fold=None):
         super(FCHypergraphLearning, self).__init__()
 
         self.type = 'static'
         self.finished_training = False
+
+        self.fold = fold
 
         self.device = device
         self.activation = nn.SiLU()
@@ -169,6 +173,7 @@ class FCHypergraphLearning(torch.nn.Module):
         self.hidden_size = hidden_size
         self.num_layers = num_layers
         self.seq_len = seq_len
+        self.num_hyperedges = 0
 
 
         if custom_layer:
@@ -413,6 +418,14 @@ class FCHypergraphLearning(torch.nn.Module):
             tqdm.write(f"       Best Model at Iteration {best_it:d}: Train: {metrics['train_Accuracy']:.4f}, "
                        f"Val: {metrics['val_Accuracy']:.4f}, Test: {metrics['test_Accuracy']:.4f}")
 
+            results = []
+            for batch in dataloaders['test']:
+                batch = batch.to(self.device)
+                output = self(batch)[1].detach().cpu().numpy()
+                results.append(output)
+
+            np.save(f"preds/fc_{self.name}_hyper_{self.num_hyperedges}_{self.fold}.npy", np.array(results))
+
             # Plot Accuracy Evolution
             plt.figure()
             plt.plot(accu[0], label='Train')
@@ -469,15 +482,15 @@ class FCHypergraphLearning(torch.nn.Module):
             plt.clf()
             plt.close()
 
-        torch.save(self.state_dict(), 'proposed_model.pth')
         return metrics
 
 class CorrelationToIncidenceTransformer(FCHypergraphLearning):
-    def __init__(self, num_hyperedges, in_size, hidden_size, seq_len, num_heads, num_layers, dropout, device, y):
+    def __init__(self, num_hyperedges, in_size, hidden_size, seq_len, num_heads, num_layers, dropout, device, y, fold):
         super(CorrelationToIncidenceTransformer, self).__init__(in_size, hidden_size, seq_len, num_layers,
-                                                                dropout, device, y, custom_layer=True)
+                                                                dropout, device, y, custom_layer=True, fold=fold)
         self.type = 'incidence_static'
         self.num_hyperedges = num_hyperedges
+        self.name = 'proposed'
 
         self.transformer_encoder = nn.TransformerEncoder(
                                         nn.TransformerEncoderLayer(d_model=in_size, nhead=num_heads, dropout=dropout,
@@ -488,6 +501,9 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
         self.fc = nn.Linear(in_size*in_size, in_size*num_hyperedges)
 
         self.param = nn.Parameter(torch.Tensor([0.0]).repeat(self.num_hyperedges), requires_grad=True)
+
+        self.bn1 = nn.LayerNorm(hidden_size)
+        self.bn2 = nn.LayerNorm(int(hidden_size/2))
 
         self._initialize_weights()
 
@@ -505,42 +521,11 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
         incidence_matrix_sig = torch.sigmoid(x)
         incidence_matrix = torch.relu(incidence_matrix_sig-torch.sigmoid(self.param))
 
-        # ======== DEBUG OPCIONAL ========
-        if False and self.training or self.show:
-            print("     \n[INCIDENCE STATS]")
-            #print("         Batch mean incidence:", incidence_matrix.mean(dim=(1, 2)))
-            print("         [DEBUG] H.std()", incidence_matrix.std().item())
-            print("         Overall max:", incidence_matrix.max().item(), "min:", incidence_matrix.min().item())
-            print("         Sparsity (ratio < 0.01):", (incidence_matrix < 0.01).float().mean().item())
-            cos_sim = []
-            l1_diff = []
-            for i in range(incidence_matrix.shape[0] - 1):
-                h1 = incidence_matrix[i].flatten()
-                h2 = incidence_matrix[i + 1].flatten()
-                cos_sim.append(F.cosine_similarity(h1, h2, dim=0).item())
-                l1_diff.append(torch.abs(h1 - h2).mean().item())
-            print("         Mean Cosine Similarity:", sum(cos_sim) / len(cos_sim))
-            print("         Mean L1 Difference:", sum(l1_diff) / len(l1_diff))
-            labels = data.y if hasattr(data, 'y') else None
-            for label_value in torch.unique(labels):
-                idx = (labels == label_value).nonzero(as_tuple=True)[0]
-                cos_sim = []
-                l1_diff = []
-                for i in range(len(idx) - 1):
-                    h1 = incidence_matrix[idx[i]].flatten()
-                    h2 = incidence_matrix[idx[i + 1]].flatten()
-                    cos_sim.append(F.cosine_similarity(h1, h2, dim=0).item())
-                    l1_diff.append(torch.abs(h1 - h2).mean().item())
-                if cos_sim:
-                    print(f"         Label {label_value.item()} Mean Cosine Similarity:",
-                          sum(cos_sim) / len(cos_sim))
-                    print(f"         Label {label_value.item()} Mean L1 Difference:", sum(l1_diff) / len(l1_diff))
-
-        input_x = torch.eye(self.roi).unsqueeze(0).repeat(input_x.shape[0], 1, 1).to(self.device)
+        input_xss = torch.eye(self.roi).unsqueeze(0).repeat(input_x.shape[0], 1, 1).to(self.device)
 
         if self.finished_training:
             incidence_matrix = incidence_matrix.detach()
-            incidence_matrix = incidence_matrix/ incidence_matrix.amax(dim=(1, 2), keepdim=True)
+            incidence_matrix = incidence_matrix/ incidence_matrix.max(dim=1, keepdim=True).values
             self.plot_corr(input_x[0], "_origin")
             self.plot_corr(x[0], '_fc', -1)
             self.plot_corr(incidence_matrix[0], '_activation')
@@ -570,27 +555,58 @@ class CorrelationToIncidenceTransformer(FCHypergraphLearning):
         emb2 = emb2.view(-1, emb2.shape[2])
         x = self.bn2(emb2).view(-1, self.roi, emb2.shape[1])
 
+        if self.finished_training:
+            batch_size, n_rois, dim = x.shape
+            tsne_dim = 2  # o 3
+
+            X_flat = x.reshape(batch_size * n_rois, dim).detach().cpu().numpy()
+
+            #t-SNE
+            tsne = TSNE(n_components=tsne_dim, perplexity=30, random_state=42)
+            X_tsne = tsne.fit_transform(X_flat)  # shape: (batch*roi, tsne_dim)
+
+            # (batch, roi, tsne_dim)
+            X_tsne_batched = torch.tensor(X_tsne).reshape(batch_size, n_rois, tsne_dim)
+
+            #
+            colors = plt.cm.get_cmap("tab20", n_rois)
+
+            plt.figure(figsize=(8, 6))
+            for roi in range(n_rois):
+                coords = X_tsne_batched[:, roi, :].numpy()  # (batch, tsne_dim)
+                plt.scatter(coords[:, 0], coords[:, 1], color=colors(roi), label=f'ROI {roi}', alpha=0.7)
+
+            plt.title("ROIs t-SNE Visualization")
+            plt.xlabel("t-SNE 1")
+            plt.ylabel("t-SNE 2")
+            plt.savefig(f"tsne_{self.num_hyperedges}.svg", format="svg", bbox_inches="tight")
+            plt.close()
+
+
         x_mean = torch.mean(x, dim=1)
         x_max = torch.max(x, dim=1)[0]
         x = torch.cat([x_mean, x_max], dim=1)
+
         x = self.dropout(x)
 
         x = self.embeddingFinal(x)
 
-        return incidence_matrix, x, input_x, x
+        return incidence_matrix, x, input_x, incidence_matrix_sig
 
     def loss(self, pred, y: Tensor, **kwargs):
         class_loss = self.loss_fn(pred[1], y.type_as(pred[1]).view_as(pred[1]))
 
         total_weight = pred[0].mean()
-        return class_loss + total_weight # 0*contrast_loss
 
-    @staticmethod
-    def plot_corr(x, suffix='', vmin=0):
+        #entropy = - (pred[0] * torch.log(pred[0] + 1e-10) + (1 - pred[0]) * torch.log(1 - pred[0] + 1e-10)).mean()
+
+        return class_loss + total_weight# + entropy
+
+    def plot_corr(self, x, suffix='', vmin=0):
         fig, ax = plt.subplots(figsize=(20, 20))
         cax = ax.matshow(x.detach().cpu(), cmap='viridis', vmin=vmin, vmax=1)
         ax.set_xticks([])
         ax.set_yticks([])
         plt.colorbar(cax)
-        plt.savefig(f"correlation_matrix{suffix}.svg", format="svg", bbox_inches="tight")
+        plt.savefig(f"correlation_matrix{suffix}_{self.num_hyperedges}.svg", format="svg", bbox_inches="tight")
         plt.close()

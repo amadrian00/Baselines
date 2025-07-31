@@ -4,21 +4,25 @@ import glob
 import warnings
 import numpy as np
 import pandas as pd
+from collections import defaultdict
 from nilearn.connectome import ConnectivityMeasure
 
 correlation_measure = ConnectivityMeasure(kind='correlation')
 warnings.filterwarnings("ignore")
 
-def get_dataframe():
-    path_data, path_demo, columns, columns_assignment = get_paths()
+def get_dataframe(name = 'ABIDE'):
+    if name == 'ABIDE':
+        path_data, path_demo, columns, columns_assignment = get_paths()
 
-    df_demo = prepare_demo(path_demo, columns, columns_assignment)
+        df_demo = prepare_demo(path_demo, columns, columns_assignment)
 
-    df = prepare_dataframe(path_data)
+        df = prepare_dataframe(path_data)
 
-    df['site_id'] = pd.Categorical(df['site']).codes
-    df = pd.merge(df, df_demo, on='sid', how='inner')
-    df['stratify_col'] = df['site_id'].astype(str) + "_" + df['label'].astype(str)
+        df['site_id'] = pd.Categorical(df['site']).codes
+        df = pd.merge(df, df_demo, on='sid', how='inner')
+        df['stratify_col'] = df['site_id'].astype(str) + "_" + df['label'].astype(str)
+    else:
+        df = prepare_dataframe2('/DataCommon3/daheo/ADNI3/step4_postprocess/1_Atlas_BOLD_Extract/GSR/CC200')
     return df
 
 def prepare_demo(path, columns, columns_assignment):
@@ -78,4 +82,33 @@ def prepare_dataframe(path_data):
     df = pd.DataFrame.from_dict(df_dict)
 
     return df
+
+def prepare_dataframe2(path_data):
+    file_list = sorted(glob.glob(os.path.join(path_data, "**", "*.npz"), recursive=True))
+    subject_count = defaultdict(int)
+
+    data_dict = {
+        'time': [],
+        'corr': [],
+        'sid': [],
+        'sex': [],
+        'age': [],
+        'label': []
+    }
+
+    for file in file_list:
+        data = np.load(file)
+        base_id = data['eid'].item()
+        unique_id = f"{base_id}_{subject_count[base_id]}"
+        subject_count[base_id] += 1
+
+        data_dict['time'].append(data['bold'].tolist())
+        data_dict['corr'].append(data['corr'])
+        data_dict['sex'].append(data['gender'])
+        data_dict['age'].append(float(data['age']))
+        data_dict['sid'].append(unique_id)
+        data_dict['label'].append(int(data['dx']!='CN'))
+        data.close()
+
+    return pd.DataFrame.from_dict(data_dict)
 

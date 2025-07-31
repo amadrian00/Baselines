@@ -216,8 +216,7 @@ class SecondFCHypergraph(Dataset):
             for i, fc in enumerate(batch.x.view(-1,200,200)):
                 proposed_hyperedge_index, proposed_hyperedge_weight, proposed_x = self.proposed(fc.to(self.device))
 
-                graph = Data(x=fc, y=batch.y[i].view(-1, 1),
-
+                graph = Data(x=fc, y=batch.y[i],
                              proposed_hyperedge_index=proposed_hyperedge_index,
                              proposed_weight=proposed_hyperedge_weight,
                              proposed_x=proposed_x,
@@ -228,14 +227,21 @@ class SecondFCHypergraph(Dataset):
 
     def proposed(self, fc):
         incidence, _, x, _ = self.model(fc)
+        x = x.squeeze().clone().float().detach()
 
-        proposed_hyperedge_index = incidence.detach().squeeze()
-        proposed_hyperedge_index = torch.where(proposed_hyperedge_index < 0.2, torch.tensor(0.0),
-                                               proposed_hyperedge_index)
+        batch_size, rows, current_cols = incidence.shape
+        pad_cols = 200 - current_cols
 
-        weight = torch.tensor([0])
+        # Genera padding con las dimensiones correctas
+        padding = torch.zeros(batch_size, rows, pad_cols, dtype=incidence.dtype, device=incidence.device)
 
-        return proposed_hyperedge_index, weight, x.squeeze().detach()
+        # Concatena a lo largo de la dimensión de columnas (dim=2)
+        incidence = torch.cat([incidence, padding], dim=2)
+        proposed = incidence.squeeze().clone().float().detach()
+
+        proposed, weight = dense_to_sparse(proposed)
+
+        return proposed, weight, x
 
     def __getitem__(self, index):
         return self.graphs[index]
