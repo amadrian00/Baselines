@@ -1,30 +1,67 @@
 import numpy as np
 from utils import compute_stats
+from collections import defaultdict
+import os
 
-model = 'gat'  # ['knn', 'ts-modelling', 'fc-modelling', 'k-random', 'gat', 'thfcn', 'gcn', 'gsage', 'proposed']
-all_results_np = np.load(f'results/fold_results_{model}_hyper.npy')
+models = ['hyper', 'hgnn', 'hgnnplus']
+names = ['proposed', 'btf', 'knn', 'k-random', 'gat', 'gcn', 'gsage', 'braingnn', 'thfcn', 'brainnetcnn', 'ts-modelling', 'fc-modelling']
 
-test_acc = all_results_np[:, :, 1].flatten()
-test_auc = all_results_np[:, :, 2].flatten()
-test_f1 = all_results_np[:, :, 3].flatten()
-test_sensitivity = all_results_np[:, :, 4].flatten()
-test_specificity = all_results_np[:, :, 5].flatten()
+orden_deseado = [
+    'brainnetcnn', 'btf', 'gcn', 'graphsage', 'gat', 'braingnn',
+    'k-random', 'knn', 'fc-modelling', 'ts-modelling', 'thfcn', 'proposed'
+]
 
-test_acc_mean, test_acc_std = compute_stats(test_acc)
-test_auc_mean, test_auc_std = compute_stats(test_auc)
-test_f1_mean, test_f1_std = compute_stats(test_f1)
-test_sensitivity_mean, test_sensitivity_std = compute_stats(test_sensitivity)
-test_specificity_mean, test_specificity_std = compute_stats(test_specificity)
+# Diccionario para almacenar los resultados por modelo base
+results_table = defaultdict(list)
 
-print(f"{'Metric':<20} {'Mean':>10} {'Std':>10}")
-print(f"{'-' * 48}")
-print(
-    f"{'Test Accuracy':<20} {test_acc_mean:>10.4f} {test_acc_std:>10.4f}")
-print(
-    f"{'Test AUC':<20} {test_auc_mean:>10.4f} {test_auc_std:>10.4f}")
-print(
-    f"{'Test F1':<20} {test_f1_mean:>10.4f} {test_f1_std:>10.4f}")
-print(
-    f"{'Test Sensitivity':<20} {test_sensitivity_mean:>10.4f} {test_sensitivity_std:>10.4f}")
-print(
-    f"{'Test Specificity':<20} {test_specificity_mean:>10.4f} {test_specificity_std:>10.4f}")
+for model in models:
+    for name in names:
+        # Construir la ruta del archivo correspondiente
+        if name == 'proposed':
+            path = f"paper/5r 5f_no feats/results/fold_results_proposed_{model}.npy"
+        else:
+            path = f"paper/5r 5f_feats/results/fold_results_{name}_{model}.npy"
+
+        if not os.path.exists(path):
+            print(f"[AVISO] Fichero no encontrado: {path}")
+            continue
+
+        res = np.load(path)  # Dimensión esperada: (R, 6)
+
+        try:
+            acc = res[:,:, 1]
+            auc = res[:,:, 2]
+            f1 = res[:, :,3]
+        except:
+            acc = res[:, 1]
+            auc = res[:, 2]
+            f1 = res[:,3]
+
+        acc_mean, acc_std = compute_stats(acc)
+        auc_mean, auc_std = compute_stats(auc)
+        f1_mean, f1_std = compute_stats(f1)
+
+        results_table[model].append({
+            'base': name,
+            'acc_mean': acc_mean, 'acc_std': acc_std,
+            'auc_mean': auc_mean, 'auc_std': auc_std,
+            'f1_mean': f1_mean, 'f1_std': f1_std
+        })
+
+# Mostrar resultados en consola de forma estructurada
+for model in models:
+    print(f"\n=== {model.upper()} ===")
+    print(f"{'Base Model':<15} {'AUROC (±)':<20} {'Accuracy (±)':<20} {'F1 Score (±)':<20}")
+    print("-" * 75)
+
+    # Convertir a dict por nombre para acceso rápido
+    model_results = {entry['base']: entry for entry in results_table[model]}
+
+    for name in orden_deseado:
+        if name not in model_results:
+            continue
+        entry = model_results[name]
+        print(f"{entry['base']:<15} "
+              f"{entry['auc_mean']:.4f} ± {entry['auc_std']:.4f}   "
+              f"{entry['acc_mean']:.4f} ± {entry['acc_std']:.4f}   "
+              f"{entry['f1_mean']:.4f} ± {entry['f1_std']:.4f}")
