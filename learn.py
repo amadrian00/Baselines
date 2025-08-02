@@ -2,24 +2,26 @@ import torch
 import copy
 import numpy as np
 import torch.nn as nn
-from torch_geometric.utils import dense_to_sparse
 from tqdm import tqdm
 from torch import Tensor
 import matplotlib.pyplot as plt
 from collections import OrderedDict
+from dhg.models.hypergraphs.hgnnp import HGNNP
+from dhg.models.hypergraphs.hgnn import HGNN
 from torch_geometric.nn.conv import HypergraphConv, GATConv, GCNConv, SAGEConv
 from torch_geometric.nn.pool import global_max_pool, global_mean_pool
 from torcheval.metrics import BinaryAUROC, BinaryF1Score, BinaryRecall, BinaryConfusionMatrix, BinaryAccuracy
 
-from hypergraph.bnt import BrainNetworkTransformer
-from hypergraph.brainnetcnn import BrainNetCNN
+from baseline_models.bnt import BrainNetworkTransformer
+from baseline_models.brainnetcnn import BrainNetCNN
 
 class FCHypergraphLearning(torch.nn.Module):
-    def __init__(self, in_size, hidden_size, dropout, device, y: Tensor, num_hyperedges, name, fold):
+    def __init__(self, in_size, hidden_size, dropout, device, y: Tensor, num_hyperedges, name, model_name, fold, use_features):
         super(FCHypergraphLearning, self).__init__()
 
         self.name = name
         self.fold = fold
+        self.use_features = use_features
 
         self.device = device
         self.activation = nn.SiLU()
@@ -34,7 +36,13 @@ class FCHypergraphLearning(torch.nn.Module):
         self.hidden_size = hidden_size
         self.num_hyperedges = num_hyperedges
 
-        if name == 'gat':
+        self.model_name = model_name
+
+        if model_name == 'hgnn':
+            self.model = HGNN(in_size, hidden_size, int(hidden_size/2), True).to(self.device)
+        elif model_name == 'hgnnplus':
+            self.model = HGNNP(in_size, hidden_size, int(hidden_size/2), True).to(self.device)
+        elif name == 'gat':
             self.conv1 = GATConv(in_size, hidden_size)
             self.conv2 = GATConv(hidden_size, int(hidden_size/2))
         elif name == 'gsage':
@@ -88,48 +96,49 @@ class FCHypergraphLearning(torch.nn.Module):
     def forward(self, data):
         batch = data.batch
         input_x = data.x
-        #No feats (supplementary materials)
-        input_x = data.eye
+        input_x = input_x.view(-1, input_x.shape[1], input_x.shape[1])
+        if not self.use_features:
+            input_x = data.eye
 
-        if self.name == 'knn':
-            hyperedge_index = data.hyperedge_index
-            weights = data.hyperedge_weight
-        elif self.name == "ts-modelling":
-            hyperedge_index = data.ts_modelling_index
-            weights = data.ts_modelling_weight
-        elif self.name == "fc-modelling":
-            hyperedge_index = data.fc_modelling_index
-            weights = data.fc_modelling_weight
-        elif self.name == "k-random":
-            hyperedge_index = data.random_hyperedge_index
-            weights = data.random_hyperedge_weight
-        elif self.name in {'gat', 'gsage', 'gcn'}:
-            hyperedge_index = data.edge_index
-            weights = data.weight
-        elif self.name == 'thfcn':
-            hyperedge_index = data.thfcn_index
-            weights = data.thfcn_weight
-        elif self.name == 'proposed':
-            hyperedge_index = data.proposed_hyperedge_index
-            weights = data.proposed_weight
-        elif self.name == 'btf' or self.name == 'brainnetcnn':
-            input_x = input_x.view(-1, self.roi, self.roi)
-            if self.name == 'btf':
-                x = self.conv1(input_x)[0]
-            else:
-                x = self.conv1(input_x)
-            return x
+        if self.model_name in {'hgnn', 'hgnnplus'}:
+            hypergraph = getattr(data, self.name, None)
+            if hypergraph is None:
+                raise ValueError(f"Invalid 'name' provided: {self.name}.")
         else:
-            raise ValueError(
-                f"Invalid 'name' provided: {self.name}. Must be 'knn', 'ts-modelling', 'fc-modelling', or 'k-random'.")
+            if self.name in {'knn', 'ts-modelling', 'fc-modelling', 'k-random', 'thfcn', 'proposed'}:
+                idx_attr = {
+                    'knn': ('hyperedge_index', 'hyperedge_weight'),
+                    'ts-modelling': ('ts_modelling_index', 'ts_modelling_weight'),
+                    'fc-modelling': ('fc_modelling_index', 'fc_modelling_weight'),
+                    'k-random': ('random_hyperedge_index', 'random_hyperedge_weight'),
+                    'thfcn': ('thfcn_index', 'thfcn_weight'),
+                    'proposed': ('proposed_hyperedge_index', 'proposed_weight')
+                }
+                hyperedge_index = getattr(data, idx_attr[self.name][0])
+                weights = getattr(data, idx_attr[self.name][1])
+            elif self.name in {'gat', 'gsage', 'gcn'}:
+                hyperedge_index = data.edge_index
+                weights = data.weight
+            elif self.name in {'btf', 'brainnetcnn'}:
+                input_x = input_x.view(-1, self.roi, self.roi)
+                x = self.conv1(input_x)[0] if self.name == 'btf' else self.conv1(input_x)
+                return x
+            else:
+                raise ValueError(
+                    f"Invalid 'name' provided: {self.name}.")
 
-        if self.name!= 'gsage': x = self.conv1(input_x, hyperedge_index, weights)
-        else : x = self.conv1(input_x, hyperedge_index)
-        x = self.bn1(x)
-        x = self.activation(x)
+        if self.model_name == 'hgnn' or self.model_name == 'hgnnplus':
+            x = torch.stack([self.model(f, h) for f, h in zip(input_x, hypergraph)])
+            x = x.contiguous().view(-1, int(self.hidden_size / 2))
+        else:
+            if self.name!= 'gsage': x = self.conv1(input_x, hyperedge_index, weights)
+            else : x = self.conv1(input_x, hyperedge_index)
 
-        if self.name!= 'gsage': x = self.conv2(x, hyperedge_index, weights)
-        else: x = self.conv2(x, hyperedge_index)
+            x = self.bn1(x)
+            x = self.activation(x)
+
+            if self.name!= 'gsage': x = self.conv2(x, hyperedge_index, weights)
+            else: x = self.conv2(x, hyperedge_index)
 
         x_mean = global_mean_pool(x, batch)
         x_max = global_max_pool(x, batch)
@@ -253,9 +262,9 @@ class FCHypergraphLearning(torch.nn.Module):
             ord_dict = OrderedDict([
                 ('Loss', f"{log_loss:.4f}"),
                 ('Loss Val', f"{metrics['val_Loss']:.4f}"),
-                ('Train', f"{metrics[f"train_{metric}"]:.4f}"),
-                ('Val', f"{metrics[f"val_{metric}"]:.4f}"),
-                ('Test', f"{metrics[f"test_{metric}"]:.4f}")
+                ('Train', f"{metrics['train_' + metric]:.4f}"),
+                ('Val', f"{metrics['val_' + metric]:.4f}"),
+                ('Test', f"{metrics['test_' + metric]:.4f}")
             ])
             epoch_bar.set_postfix(ord_dict)
 
@@ -284,13 +293,16 @@ class FCHypergraphLearning(torch.nn.Module):
 
         metrics = self.test(dataloaders, find_threshold=True)
 
+
         results = []
         for batch in dataloaders['test']:
             batch = batch.to(self.device)
             output = self(batch).detach().cpu().numpy()
             results.append(output)
 
-        np.save(f"preds/fc_{self.name}_hyper_{self.fold}.npy", np.array(results))
+        np.save(f"preds/fc_{self.name}_{self.model_name}_{self.fold}_{'feats' if self.use_features else 'nofeats'}.npy",
+                np.array(results))
+
 
         tqdm.write(f"       Best Model at Iteration {best_it:d}: Train: {metrics['train_Accuracy']:.4f}, "
                     f"Val: {metrics['val_Accuracy']:.4f}, Test: {metrics['test_Accuracy']:.4f}")
@@ -305,7 +317,7 @@ class FCHypergraphLearning(torch.nn.Module):
         plt.ylabel('Accuracy')
         plt.xlabel('Epoch')
         plt.xticks(range(0, epochs, max(1, epochs // 10)))
-        plt.savefig(f"figures/accuracy_fc_{self.name}_hyper.svg", format='svg', dpi=1200)
+        plt.savefig(f"figures/accuracy_fc_{self.name}_{self.model_name}.svg", format='svg', dpi=1200)
         plt.clf()
         plt.close()
 
@@ -318,7 +330,7 @@ class FCHypergraphLearning(torch.nn.Module):
         plt.xlabel('Epoch')
         plt.legend()
         plt.xticks(range(0, epochs, max(1, epochs // 10)))
-        plt.savefig(f"figures/loss_fc_{self.name}_hyper.svg", format='svg', dpi=1200)
+        plt.savefig(f"figures/loss_fc_{self.name}_{self.model_name}.svg", format='svg', dpi=1200)
         plt.clf()
         plt.close()
 
