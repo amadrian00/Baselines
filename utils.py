@@ -3,7 +3,7 @@ import torch
 import numpy as np
 from torch.utils.data import Subset
 from prepare_dataset import get_dataframe
-from hypergraph_generator import FCHypergraph
+from hypergraph.hypergraph_generator.hypergraph_generator import FCHypergraph
 from torch_geometric.loader import DataLoader
 from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.model_selection import StratifiedShuffleSplit
